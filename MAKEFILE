@@ -1,11 +1,22 @@
 CC=cl
 RC=rc
-CFLAGS=/W3 /O2 /nologo
-LDFLAGS=/link user32.lib gdi32.lib advapi32.lib /SUBSYSTEM:WINDOWS
+
+# --- Configuration Logic ---
+# Usage: nmake CONF=debug or nmake CONF=release
+!IF "$(CONF)" == "debug"
+CFLAGS=/W3 /Zi /Od /nologo /D_DEBUG /MTd
+LDFLAGS_CONF=/DEBUG
+!ELSE
+# Release is the default
+CFLAGS=/W3 /O2 /nologo /DNDEBUG /MT
+LDFLAGS_CONF=/OPT:REF /OPT:ICF
+!ENDIF
+
+LDFLAGS=/link user32.lib gdi32.lib advapi32.lib shell32.lib ole32.lib shlwapi.lib /SUBSYSTEM:WINDOWS $(LDFLAGS_CONF)
 
 SRC_DIR=src
 RES_DIR=res
-BUILD_DIR=build
+BUILD_DIR=build\$(CONF)
 BIN_DIR=$(BUILD_DIR)\bin
 OBJ_DIR=$(BUILD_DIR)\obj
 
@@ -16,6 +27,7 @@ OBJECTS=$(OBJ_DIR)\main.obj $(OBJ_DIR)\app.res
 all: dirs $(TARGET)
 
 dirs:
+	@if not exist build mkdir build
 	@if not exist $(BUILD_DIR) mkdir $(BUILD_DIR)
 	@if not exist $(BIN_DIR) mkdir $(BIN_DIR)
 	@if not exist $(OBJ_DIR) mkdir $(OBJ_DIR)
@@ -23,14 +35,14 @@ dirs:
 $(OBJ_DIR)\main.obj: $(SRC_DIR)\main.c
 	$(CC) $(CFLAGS) /c $(SRC_DIR)\main.c /Fo$(OBJ_DIR)\main.obj
 
-$(OBJ_DIR)\app.res: $(RES_DIR)\app.rc $(RES_DIR)\manifest.xml
+$(OBJ_DIR)\app.res: $(RES_DIR)\app.rc $(RES_DIR)\manifest.xml $(RES_DIR)\icon.ico
 	$(RC) /fo $(OBJ_DIR)\app.res $(RES_DIR)\app.rc
 
 $(TARGET): $(OBJECTS)
 	$(CC) $(OBJECTS) /Fe$(TARGET) $(LDFLAGS)
 
 clean:
-	@if exist $(BUILD_DIR) rmdir /S /Q $(BUILD_DIR)
+	@if exist build rmdir /S /Q build
 
 rebuild: clean all
 
