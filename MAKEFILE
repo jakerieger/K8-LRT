@@ -1,0 +1,37 @@
+CC=cl
+RC=rc
+CFLAGS=/W3 /O2 /nologo
+LDFLAGS=/link user32.lib gdi32.lib advapi32.lib /SUBSYSTEM:WINDOWS
+
+SRC_DIR=src
+RES_DIR=res
+BUILD_DIR=build
+BIN_DIR=$(BUILD_DIR)\bin
+OBJ_DIR=$(BUILD_DIR)\obj
+
+TARGET=$(BIN_DIR)\K8LibRemovalTool.exe
+SOURCES=$(SRC_DIR)\main.c
+OBJECTS=$(OBJ_DIR)\main.obj $(OBJ_DIR)\app.res
+
+all: dirs $(TARGET)
+
+dirs:
+	@if not exist $(BUILD_DIR) mkdir $(BUILD_DIR)
+	@if not exist $(BIN_DIR) mkdir $(BIN_DIR)
+	@if not exist $(OBJ_DIR) mkdir $(OBJ_DIR)
+
+$(OBJ_DIR)\main.obj: $(SRC_DIR)\main.c
+	$(CC) $(CFLAGS) /c $(SRC_DIR)\main.c /Fo$(OBJ_DIR)\main.obj
+
+$(OBJ_DIR)\app.res: $(RES_DIR)\app.rc $(RES_DIR)\manifest.xml
+	$(RC) /fo $(OBJ_DIR)\app.res $(RES_DIR)\app.rc
+
+$(TARGET): $(OBJECTS)
+	$(CC) $(OBJECTS) /Fe$(TARGET) $(LDFLAGS)
+
+clean:
+	@if exist $(BUILD_DIR) rmdir /S /Q $(BUILD_DIR)
+
+rebuild: clean all
+
+.PHONY: all clean rebuild dirs
