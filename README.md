@@ -20,6 +20,13 @@ You can download the latest version of K8-LRT from the [releases](https://github
 
 ## Changelog
 
+### 0.2.0 (January 23, 2026)
+
+- Tons of bug fixes and improvements
+- Added a `Remove All` button in place of the quit button
+- Filter registry entries to remove non-library entries
+- General code improvements
+
 ### 0.1.0 (January 22, 2026)
 
 - Initial release of K8-LRT
