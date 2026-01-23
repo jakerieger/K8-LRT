@@ -1,6 +1,6 @@
 # Kontakt 8 Library Removal Tool (K8-LRT)
 
-K8-LRT is a tool for removing libraries for the Bobdule version of Kontakt 8. Currently **Windows only**.
+K8-LRT is a tool for removing libraries from the Bobdule version of Kontakt 8. Currently **Windows only**.
 
 ![](docs/screenshot.png)
 
@@ -9,16 +9,24 @@ K8-LRT completely removes Kontakt libraries from the cache on disk. Native Instr
 Locations that need to be searched and deleted:
 
 - `HKEY_LOCAL_MACHINE\SOFTWARE\Native Instruments\<Library Name>`
-- `HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Native Instruments` (edge-case, still needs checked)
+- `HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Native Instruments\<Library Name>` (edge-case, still needs checked)
 - `C:\Program Files\Common Files\Native Instruments\Service Center\<Library Name>.xml`
-- `~\AppData\Local\Native Instruments\Kontakt 8\LibrariesCache`
+- `~\AppData\Local\Native Instruments\Kontakt 8\LibrariesCache\<filename>`
 - `~\AppData\Local\Native Instruments\Kontakt 8\komplete.db3`
 
 ## Install
 
-You can download the latest version of K8-LRT from the [releases](https://github.com/jakerieger/K8-LRT/releases/latest) page.
+The latest version of K8-LRT is v0.3.0 - you can [download it here](https://github.com/jakerieger/K8-LRT/releases/latest).
 
 ## Changelog
+
+### 0.3.0 (January 23, 2026)
+
+- Sweeping code changes and refactoring
+- Bug fixes and improvements
+- Logging for debugging issues if any arise
+- Library entry filtering to remove non-library entries
+- More robust error handling
 
 ### 0.2.0 (January 23, 2026)
 
@@ -33,7 +41,11 @@ You can download the latest version of K8-LRT from the [releases](https://github
 
 ## Building
 
-K8-LRT is written in pure C using the Windows API. It can be compiled via `nmake` which is included with the MSVC toolchain.
+K8-LRT is written in pure C using the Windows API. It can be compiled via `nmake` which is included with the MSVC toolchain. This requires the C++ Visual Studio toolchain to be installed. If it is, you can simply run the build script from PowerShell to build K8-LRT:
+
+```powershell
+.\build.ps1 -Config debug # or release
+```
 
 ## License
 
