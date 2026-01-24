@@ -1,5 +1,5 @@
 /*
-    K8-LRT - v0.3.0 - Library removal tool for Bobdule's Kontakt 8
+    K8-LRT - v0.3.1 - Library removal tool for Bobdule's Kontakt 8
 
     LICENSE
 
