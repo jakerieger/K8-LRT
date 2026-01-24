@@ -20,6 +20,11 @@ The latest version of K8-LRT is v0.3.0 - you can [download it here](https://gith
 
 ## Changelog
 
+### 0.3.1 (January 23, 2026)
+
+- Improved memory management model
+- Added backups for cache files
+
 ### 0.3.0 (January 23, 2026)
 
 - Sweeping code changes and refactoring
@@ -41,7 +46,9 @@ The latest version of K8-LRT is v0.3.0 - you can [download it here](https://gith
 
 ## Building
 
-K8-LRT is written in pure C using the Windows API. It can be compiled via `nmake` which is included with the MSVC toolchain. This requires the C++ Visual Studio toolchain to be installed. If it is, you can simply run the build script from PowerShell to build K8-LRT:
+K8-LRT is written in pure C using the Windows API. The entire program is just under 900 lines of code and the executable is only about 270 Kb. 
+
+K8-LRT can be compiled via `nmake`, which is included with the MSVC toolchain. This requires the C++ Visual Studio toolsuite to be installed. If it is, you can simply run the build script from PowerShell to build K8-LRT:
 
 ```powershell
 .\build.ps1 -Config debug # or release

@@ -1,6 +1,5 @@
 /*
     K8-LRT - v0.3.0 - Library removal tool for Bobdule's Kontakt 8
-    Copyright - (C) 2026 Jake Rieger
 
     LICENSE
 
@@ -60,10 +59,10 @@ typedef enum {
     LOG_DEBUG,
 } log_level;
 
-static FILE* g_log_file = NULL;
+static FILE* LOG_FILE = NULL;
 
 void log_msg(log_level level, const char* fmt, ...) {
-    if (!g_log_file)
+    if (!LOG_FILE)
         return;
 
     SYSTEMTIME st;
@@ -89,7 +88,7 @@ void log_msg(log_level level, const char* fmt, ...) {
             break;
     }
 
-    fprintf(g_log_file,
+    fprintf(LOG_FILE,
             "[%04d-%02d-%02d %02d:%02d:%02d.%03d] [%s] ",
             st.wYear,
             st.wMonth,
@@ -102,15 +101,15 @@ void log_msg(log_level level, const char* fmt, ...) {
 
     va_list args;
     va_start(args, fmt);
-    vfprintf(g_log_file, fmt, args);
+    vfprintf(LOG_FILE, fmt, args);
     va_end(args);
 
-    fprintf(g_log_file, "\n");
-    fflush(g_log_file);
+    fprintf(LOG_FILE, "\n");
+    fflush(LOG_FILE);
 }
 
 void log_init(HWND hwnd, const char* filename) {
-    errno_t result = fopen_s(&g_log_file, filename, "a");  // append mode
+    errno_t result = fopen_s(&LOG_FILE, filename, "a");  // append mode
     if (result == 0) {
         log_msg(LOG_INFO, "--- K8-LRT Started ---");
     } else {
@@ -120,9 +119,9 @@ void log_init(HWND hwnd, const char* filename) {
 }
 
 void log_close() {
-    if (g_log_file) {
+    if (LOG_FILE) {
         log_msg(LOG_INFO, "--- K8-LRT Stopped ---");
-        fclose(g_log_file);
+        fclose(LOG_FILE);
     }
 }
 
@@ -137,6 +136,74 @@ void log_close() {
 #define _LOG(fmt, ...) log_msg(LOG_DEBUG, fmt, ##__VA_ARGS__)
 
 //====================================================================//
+//                           -- MEMORY --                             //
+//====================================================================//
+
+#define _ARENA_BASE (sizeof(mem_arena))
+#define _PAGESIZE (sizeof(void*))
+#define _ALIGN_UP(x, align) (((x) + (align) - 1) & ~((align) - 1))
+#define _KB(n) ((UINT64)(n) << 10)
+#define _MB(n) ((UINT64)(n) << 20)
+#define _GB(n) ((UINT64)(n) << 30)
+
+typedef struct {
+    UINT64 capacity;
+    UINT64 position;
+} mem_arena;
+
+static mem_arena* ARENA = NULL;
+
+void arena_init(UINT64 capacity) {
+    ARENA = (mem_arena*)malloc(capacity);
+    if (!ARENA) {
+        _FATAL("Failed to allocate memory");
+    }
+
+    ARENA->position = _ARENA_BASE;
+    ARENA->capacity = capacity;
+}
+
+void arena_destroy() {
+    free(ARENA);
+}
+
+void* arena_push(UINT64 size, BOOL non_zero) {
+    UINT64 pos_aligned = _ALIGN_UP(ARENA->position, _PAGESIZE);
+    UINT64 new_pos     = pos_aligned + size;
+
+    if (new_pos > ARENA->capacity) {
+        _FATAL("Arena capacity is full");
+    }
+
+    ARENA->position = new_pos;
+    UINT8* new_mem  = (UINT8*)ARENA + pos_aligned;
+
+    if (!non_zero) {
+        memset(new_mem, 0, size);
+    }
+
+    return new_mem;
+}
+
+void arena_pop(UINT64 size) {
+    size = min(size, ARENA->position - _ARENA_BASE);
+    ARENA->position -= size;
+}
+
+void arena_pop_to(UINT64 position) {
+    UINT64 size = position < ARENA->position ? ARENA->position - 1 : 0;
+    arena_pop(size);
+}
+
+void arena_clear() {
+    arena_pop_to(_ARENA_BASE);
+}
+
+#define _ALLOC_ARRAY(type, count) (type*)arena_push(sizeof(type) * (count), FALSE)
+#define _ALLOC_STR(length) (char*)arena_push(sizeof(char) * (length), FALSE)
+#define _ALLOC(type) (type*)arena_push(sizeof(type), FALSE)
+
+//====================================================================//
 //                   -- UI ELEMENT DEFINITIONS --                     //
 //====================================================================//
 
@@ -147,26 +214,25 @@ void log_close() {
 
 #define IDI_APPICON 501
 
-static HWND h_listbox;
-static HWND h_remove_button;
-static HWND h_remove_all_button;
-static HWND h_backup_checkbox;  // Whether or not we should backup delete files
+static HWND H_LISTBOX;
+static HWND H_REMOVE_BUTTON;
+static HWND H_REMOVE_ALL_BUTTON;
+static HWND H_BACKUP_CHECKBOX;  // Whether or not we should backup delete files
 
 //====================================================================//
 //                          -- GLOBALS --                             //
 //====================================================================//
 
-#define STREQ(s1, s2) strcmp(s1, s2) == 0
-#define IS_CHECKED(checkbox) (SendMessage(checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED)
+#define _STREQ(s1, s2) strcmp(s1, s2) == 0
+#define _IS_CHECKED(checkbox) (SendMessage(checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED)
+#define _MAX_LIB_COUNT 512
+#define _LIB_CACHE_ROOT "Native Instruments\\Kontakt 8\\LibrariesCache"
+#define _DB3_ROOT "Native Instruments\\Kontakt 8\\komplete.db3"
 
-#define MAX_LIB_COUNT 512
-static char* g_libraries[MAX_LIB_COUNT];
-static int g_lib_count      = 0;
-static int g_selected_index = -1;
-static BOOL g_backup_files  = TRUE;
-
-#define LIB_CACHE_ROOT "Native Instruments\\Kontakt 8\\LibrariesCache"
-#define DB3_ROOT "Native Instruments\\Kontakt 8\\komplete.db3"
+static char** LIBRARIES   = {NULL};
+static int LIB_COUNT      = 0;
+static int SELECTED_INDEX = -1;
+static BOOL BACKUP_FILES  = TRUE;
 
 // Exclusion list - NI products that aren't libraries
 static char* EXCLUSION_LIST[] = {
@@ -228,7 +294,12 @@ char* get_local_appdata_path() {
         char path[MAX_PATH];
         WideCharToMultiByte(CP_ACP, 0, psz_path, -1, path, MAX_PATH, NULL, NULL);
         CoTaskMemFree(psz_path);
-        return _strdup(path);
+
+        char* path_mem = _ALLOC_STR(strlen(path) + 1);
+        memcpy(path_mem, path, strlen(path));
+        path_mem[strlen(path)] = '\0';
+
+        return path_mem;
     } else {
         _ERROR("Failed to retrieve path. Error code: 0x%08X\n", (UINT)hr);
     }
@@ -241,16 +312,15 @@ char* join_str(const char* prefix, const char* suffix) {
     const size_t suffix_len = strlen(suffix);
     const size_t needed     = prefix_len + suffix_len + 1;
 
-    char* buffer = (char*)malloc(needed);
-    if (!buffer) {
-        _FATAL("Failed to allocate memory");
-    }
+    char* buffer = _ALLOC_STR(needed);
+    int offset   = 0;
 
-    int offset = 0;
     memcpy(buffer, prefix, prefix_len);
     offset += prefix_len;
+
     memcpy(buffer + offset, suffix, suffix_len);
     offset += suffix_len;
+
     buffer[offset] = '\0';
 
     return buffer;
@@ -259,7 +329,6 @@ char* join_str(const char* prefix, const char* suffix) {
 char* join_paths(const char* path_prefix, const char* path_suffix) {
     char* prefix = join_str(path_prefix, "\\");
     char* full   = join_str(prefix, path_suffix);
-    free(prefix);
     return full;
 }
 
@@ -281,7 +350,7 @@ BOOL file_exists(const char* path) {
 
 BOOL list_contains(char* haystack[], const char* needle) {
     for (char** p = haystack; *p != NULL; p++) {
-        if (STREQ(*p, needle))
+        if (_STREQ(*p, needle))
             return TRUE;
     }
     return FALSE;
@@ -308,18 +377,24 @@ void enable_backup_privilege() {
 }
 
 void clear_libraries() {
-    for (int i = 0; i < MAX_LIB_COUNT; i++) {
-        if (g_libraries[i] != NULL) {
-            free(g_libraries[i]);
+    if (ARENA->position > _ARENA_BASE) {
+        arena_clear();
+    }
+
+    LIBRARIES = _ALLOC_ARRAY(char*, _MAX_LIB_COUNT);
+
+    for (int i = 0; i < _MAX_LIB_COUNT; i++) {
+        if (LIBRARIES[i] != NULL) {
+            free(LIBRARIES[i]);
+            LIBRARIES[i] = NULL;
         }
-        g_libraries[i] = NULL;
     }
 
     // Reset list box contents
-    SendMessage(h_listbox, LB_RESETCONTENT, 0, 0);
+    SendMessage(H_LISTBOX, LB_RESETCONTENT, 0, 0);
 
-    g_selected_index = -1;
-    g_lib_count      = 0;
+    SELECTED_INDEX = -1;
+    LIB_COUNT      = 0;
 }
 
 BOOL query_libraries() {
@@ -339,12 +414,12 @@ BOOL query_libraries() {
     FILETIME ft_last_write_time;
 
     DWORD found = 0;
-    char* found_keys[MAX_LIB_COUNT];
+    char* found_keys[_MAX_LIB_COUNT];
 
     while (RegEnumKeyExA(h_key, found, ach_key, &cb_name, NULL, NULL, NULL, &ft_last_write_time) == ERROR_SUCCESS) {
-        if (found > MAX_LIB_COUNT) {
+        if (found > _MAX_LIB_COUNT) {
             RegCloseKey(h_key);
-            _ERROR("Number of libraries found exceeds current program limit of %d", MAX_LIB_COUNT);
+            _ERROR("Number of libraries found exceeds current program limit of %d", _MAX_LIB_COUNT);
             return FALSE;
         }
 
@@ -356,28 +431,28 @@ BOOL query_libraries() {
     found_keys[found] = NULL;
 
     // Filter found keys
-    g_lib_count = 0;
+    LIB_COUNT = 0;
     for (DWORD i = 0; i < found; i++) {
         char* key = found_keys[i];
 
         if (!list_contains(EXCLUSION_LIST, key)) {
-            g_libraries[g_lib_count] = _strdup(key);
-            SendMessage(h_listbox, LB_INSERTSTRING, g_lib_count, (LPARAM)g_libraries[g_lib_count]);
-            g_lib_count++;
+            LIBRARIES[LIB_COUNT] = _strdup(key);
+            SendMessage(H_LISTBOX, LB_INSERTSTRING, LIB_COUNT, (LPARAM)LIBRARIES[LIB_COUNT]);
+            LIB_COUNT++;
         }
 
         free(key);
         found_keys[i] = NULL;
     }
-    g_libraries[g_lib_count] = NULL;
+    LIBRARIES[LIB_COUNT] = NULL;
 
-    _INFO("Finished querying registry entries (found %d library entries)", g_lib_count);
+    _INFO("Finished querying registry entries (found %d library entries)", LIB_COUNT);
 
     return TRUE;
 }
 
 BOOL remove_library(const char* name) {
-    if (!list_contains(g_libraries, name)) {
+    if (!list_contains(LIBRARIES, name)) {
         _ERROR("No library named '%s' found", name);
         return FALSE;
     }
@@ -387,7 +462,7 @@ BOOL remove_library(const char* name) {
 
     // 1. Remove registry key
     if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, base_path, 0, KEY_ALL_ACCESS, &h_key) == ERROR_SUCCESS) {
-        if (g_backup_files) {
+        if (BACKUP_FILES) {
             HKEY h_subkey;
             if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, join_paths(base_path, name), 0, KEY_READ, &h_subkey) ==
                 ERROR_SUCCESS) {
@@ -398,12 +473,10 @@ BOOL remove_library(const char* name) {
                 if (backup_res != ERROR_SUCCESS) {
                     _ERROR("Failed to backup registry entry for key: '%s\\%s'", base_path, name);
                     RegCloseKey(h_subkey);
-                    free(reg_filename);
                     return FALSE;
                 }
 
                 RegCloseKey(h_subkey);
-                free(reg_filename);
             }
         }
 
@@ -423,29 +496,21 @@ BOOL remove_library(const char* name) {
     char* filename = join_str(prefix, ".xml");
 
     if (file_exists(filename)) {
-        if (g_backup_files) {
+        if (BACKUP_FILES) {
             char* bak_filename = join_str(prefix, ".xml.bak");
             if (!CopyFileExA(filename, bak_filename, NULL, NULL, NULL, 0)) {
                 _ERROR("Failed to backup XML file: '%s'", filename);
-                free(bak_filename);
-                free(prefix);
-                free(filename);
                 return FALSE;
             }
-            free(bak_filename);
         }
 
         if (!DeleteFileA(filename)) {
             _ERROR("Failed to delete XML file: '%s'", filename);
-            free(prefix);
-            free(filename);
             return FALSE;
         }
 
         _INFO("Deleted XML file: '%s'", filename);
     }
-    free(prefix);
-    free(filename);
 
     // 3. Check for cache file in `~\AppData\Local\Native Instruments\Kontakt 8\LibrariesCache`
     // This one is tough. Cache files are binary formats and filenames appear to be hashes of some kind.
@@ -456,7 +521,7 @@ BOOL remove_library(const char* name) {
     char search_path[MAX_PATH];
     char file_path[MAX_PATH];
 
-    char* cache_path = join_paths(appdata_local, LIB_CACHE_ROOT);
+    char* cache_path = join_paths(appdata_local, _LIB_CACHE_ROOT);
     snprintf(search_path, MAX_PATH, "%s\\*", cache_path);
     h_find = FindFirstFile(search_path, &find_data);
     if (h_find != INVALID_HANDLE_VALUE) {
@@ -466,8 +531,18 @@ BOOL remove_library(const char* name) {
                 snprintf(file_path, MAX_PATH, "%s\\%s", cache_path, find_data.cFileName);
 
                 if (!(find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-                    if (g_backup_files) {
-                        // TODO: create backup
+                    if (BACKUP_FILES) {
+                        char* bak_filename = join_str(file_path, ".bak");
+                        if (file_exists(bak_filename)) {
+                            BOOL deleted = DeleteFileA(bak_filename);
+                            if (!deleted) {
+                                _ERROR("Failed to delete backup file: '%s'", bak_filename);
+                            }
+                        }
+                        BOOL copied = CopyFileExA(file_path, bak_filename, NULL, NULL, NULL, 0);
+                        if (!copied) {
+                            _ERROR("Failed to backup cache file: '%s'", file_path);
+                        }
                     }
 
                     if (!DeleteFile(file_path)) {
@@ -480,22 +555,16 @@ BOOL remove_library(const char* name) {
         } while (FindNextFile(h_find, &find_data) != 0);
         FindClose(h_find);
     }
-    free(cache_path);
 
     // 4. Create backup of `~\AppData\Local\Native Instruments\Kontakt 8\komplete.db3` to force DB rebuild (if enabled)
-    char* db3 = join_paths(appdata_local, DB3_ROOT);
-    free(appdata_local);
-
+    char* db3 = join_paths(appdata_local, _DB3_ROOT);
     if (file_exists(db3)) {
-        if (g_backup_files) {
+        if (BACKUP_FILES) {
             char* db3_bak = join_str(db3, ".bak");
             if (!CopyFileExA(db3, db3_bak, NULL, NULL, NULL, 0)) {
                 _ERROR("Failed to backup komplete.db3");
-                free(db3_bak);
-                free(db3);
                 return FALSE;
             }
-            free(db3_bak);
             _INFO("Backed up komplete.db3");
         }
 
@@ -505,8 +574,6 @@ BOOL remove_library(const char* name) {
         } else {
             _INFO("Deleted komplete.db3");
         }
-
-        free(db3);
     }
 
     _INFO("Finished removing library: '%s'", name);
@@ -515,10 +582,10 @@ BOOL remove_library(const char* name) {
 }
 
 BOOL remove_selected_library() {
-    if (g_selected_index == -1)
+    if (SELECTED_INDEX == -1)
         return FALSE;
 
-    return remove_library(g_libraries[g_selected_index]);
+    return remove_library(LIBRARIES[SELECTED_INDEX]);
 }
 
 //====================================================================//
@@ -538,7 +605,7 @@ LRESULT on_create(HWND hwnd) {
                                 GetModuleHandle(NULL),
                                 NULL);
 
-    h_listbox = CreateWindowEx(WS_EX_CLIENTEDGE,
+    H_LISTBOX = CreateWindowEx(WS_EX_CLIENTEDGE,
                                "LISTBOX",
                                NULL,
                                WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY,
@@ -551,7 +618,7 @@ LRESULT on_create(HWND hwnd) {
                                GetModuleHandle(NULL),
                                NULL);
 
-    h_backup_checkbox = CreateWindowEx(0,
+    H_BACKUP_CHECKBOX = CreateWindowEx(0,
                                        "BUTTON",
                                        "Backup files before deleting",
                                        WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX,
@@ -564,7 +631,7 @@ LRESULT on_create(HWND hwnd) {
                                        GetModuleHandle(NULL),
                                        NULL);
 
-    h_remove_all_button = CreateWindowEx(WS_EX_CLIENTEDGE,
+    H_REMOVE_ALL_BUTTON = CreateWindowEx(WS_EX_CLIENTEDGE,
                                          "BUTTON",
                                          "Remove All",
                                          WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
@@ -577,7 +644,7 @@ LRESULT on_create(HWND hwnd) {
                                          GetModuleHandle(NULL),
                                          NULL);
 
-    h_remove_button = CreateWindowEx(WS_EX_CLIENTEDGE,
+    H_REMOVE_BUTTON = CreateWindowEx(WS_EX_CLIENTEDGE,
                                      "BUTTON",
                                      "Remove Selected",
                                      WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_DISABLED,
@@ -606,12 +673,12 @@ LRESULT on_create(HWND hwnd) {
                               "Segoe UI");
 
     SendMessage(h_label, WM_SETFONT, (WPARAM)h_font, TRUE);
-    SendMessage(h_listbox, WM_SETFONT, (WPARAM)h_font, TRUE);
-    SendMessage(h_remove_all_button, WM_SETFONT, (WPARAM)h_font, TRUE);
-    SendMessage(h_remove_button, WM_SETFONT, (WPARAM)h_font, TRUE);
+    SendMessage(H_LISTBOX, WM_SETFONT, (WPARAM)h_font, TRUE);
+    SendMessage(H_REMOVE_ALL_BUTTON, WM_SETFONT, (WPARAM)h_font, TRUE);
+    SendMessage(H_REMOVE_BUTTON, WM_SETFONT, (WPARAM)h_font, TRUE);
 
-    SendMessage(h_backup_checkbox, WM_SETFONT, (WPARAM)h_font, TRUE);
-    SendMessage(h_backup_checkbox, BM_SETCHECK, (WPARAM)TRUE, TRUE);
+    SendMessage(H_BACKUP_CHECKBOX, WM_SETFONT, (WPARAM)h_font, TRUE);
+    SendMessage(H_BACKUP_CHECKBOX, BM_SETCHECK, (WPARAM)TRUE, TRUE);
 
     // Search registry for key entries in `HKEY_LOCAL_MACHINE/SOFTWARE/Native Instruments/..`
     BOOL query_result = query_libraries();
@@ -628,22 +695,22 @@ LRESULT on_create(HWND hwnd) {
 }
 
 void on_selection_changed(HWND hwnd) {
-    int sel = (int)SendMessage(h_listbox, LB_GETCURSEL, 0, 0);
+    int sel = (int)SendMessage(H_LISTBOX, LB_GETCURSEL, 0, 0);
     if (sel != LB_ERR) {
-        g_selected_index = sel;
+        SELECTED_INDEX = sel;
     }
-    EnableWindow(h_remove_button, (sel != LB_ERR));
+    EnableWindow(H_REMOVE_BUTTON, (sel != LB_ERR));
 }
 
 void on_remove_selected(HWND hwnd) {
     char msg[512];
-    sprintf_s(msg, sizeof(msg), "Are you sure you want to permanently remove '%s'?", g_libraries[g_selected_index]);
+    sprintf_s(msg, sizeof(msg), "Are you sure you want to permanently remove '%s'?", LIBRARIES[SELECTED_INDEX]);
 
     int response = MessageBox(hwnd, msg, "Confirm Removal", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
 
     if (response == IDYES) {
-        g_backup_files = IS_CHECKED(h_backup_checkbox);
-        BOOL removed   = remove_selected_library();
+        BACKUP_FILES = _IS_CHECKED(H_BACKUP_CHECKBOX);
+        BOOL removed = remove_selected_library();
 
         if (!removed) {
             MessageBox(hwnd, "Failed to remove library", "Error", MB_OK | MB_ICONERROR);
@@ -651,7 +718,7 @@ void on_remove_selected(HWND hwnd) {
         } else {
             BOOL query_result = query_libraries();
             if (query_result) {
-                EnableWindow(h_remove_button, FALSE);
+                EnableWindow(H_REMOVE_BUTTON, FALSE);
                 MessageBox(hwnd, "Successfully removed library.", "Success", MB_OK | MB_ICONINFORMATION);
             } else {
                 MessageBox(hwnd,
@@ -673,20 +740,20 @@ void on_remove_all(HWND hwnd) {
                               MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
 
     if (response == IDYES) {
-        g_backup_files   = IS_CHECKED(h_backup_checkbox);
-        g_selected_index = -1;
+        BACKUP_FILES   = _IS_CHECKED(H_BACKUP_CHECKBOX);
+        SELECTED_INDEX = -1;
 
-        for (int i = 0; i < g_lib_count; i++) {
-            BOOL removed = remove_library(g_libraries[i]);
+        for (int i = 0; i < LIB_COUNT; i++) {
+            BOOL removed = remove_library(LIBRARIES[i]);
             if (!removed) {
-                _ERROR("Failed to remove library: '%s'", g_libraries[g_selected_index]);
+                _ERROR("Failed to remove library: '%s'", LIBRARIES[SELECTED_INDEX]);
             }
             i++;
         }
 
         BOOL query_result = query_libraries();
         if (query_result) {
-            EnableWindow(h_remove_button, FALSE);
+            EnableWindow(H_REMOVE_BUTTON, FALSE);
             MessageBox(hwnd, "Successfully removed all libraries.", "Success", MB_OK | MB_ICONINFORMATION);
         } else {
             MessageBox(hwnd,
@@ -751,6 +818,7 @@ int WINAPI WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_cmd
     attach_console();
 #endif
 
+    arena_init(_KB(32));
     enable_backup_privilege();
 
     const char CLASS_NAME[] = "K8RemovalWindowClass";
@@ -797,5 +865,7 @@ int WINAPI WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_cmd
 #endif
 
     log_close();
+    arena_destroy();
+
     return 0;
 }
