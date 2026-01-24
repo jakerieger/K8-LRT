@@ -46,6 +46,7 @@
 #include <shlobj.h>
 #include <Shlwapi.h>
 #include <winuser.h>
+#include <CommCtrl.h>
 
 //====================================================================//
 //                          -- LOGGING --                             //
@@ -631,7 +632,7 @@ LRESULT on_create(HWND hwnd) {
                                        GetModuleHandle(NULL),
                                        NULL);
 
-    H_REMOVE_ALL_BUTTON = CreateWindowEx(WS_EX_CLIENTEDGE,
+    H_REMOVE_ALL_BUTTON = CreateWindowEx(0,
                                          "BUTTON",
                                          "Remove All",
                                          WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
@@ -644,7 +645,7 @@ LRESULT on_create(HWND hwnd) {
                                          GetModuleHandle(NULL),
                                          NULL);
 
-    H_REMOVE_BUTTON = CreateWindowEx(WS_EX_CLIENTEDGE,
+    H_REMOVE_BUTTON = CreateWindowEx(0,
                                      "BUTTON",
                                      "Remove Selected",
                                      WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_DISABLED,
@@ -776,6 +777,26 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM lparam) {
         case WM_CREATE:
             return on_create(hwnd);
 
+        case WM_ERASEBKGND: {
+            HDC hdc = (HDC)wparam;
+            RECT rect;
+            GetClientRect(hwnd, &rect);
+            FillRect(hdc, &rect, GetSysColorBrush(COLOR_WINDOW));
+            return 1;
+        }
+
+        case WM_CTLCOLORSTATIC: {
+            HDC hdc = (HDC)wparam;
+            SetBkMode(hdc, TRANSPARENT);
+            return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
+        }
+
+        case WM_CTLCOLORLISTBOX: {
+            HDC hdc = (HDC)wparam;
+            SetBkColor(hdc, GetSysColor(COLOR_WINDOW));
+            return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
+        }
+
         case WM_COMMAND: {
             switch (LOWORD(wparam)) {
                 case IDC_REMOVE_ALL_BUTTON: {
@@ -818,6 +839,12 @@ int WINAPI WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_cmd
     attach_console();
 #endif
 
+    // Initialize common controls
+    INITCOMMONCONTROLSEX icc;
+    icc.dwSize = sizeof(icc);
+    icc.dwICC  = ICC_WIN95_CLASSES | ICC_STANDARD_CLASSES;
+    InitCommonControlsEx(&icc);
+
     arena_init(_KB(32));
     enable_backup_privilege();
 
@@ -832,10 +859,10 @@ int WINAPI WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_cmd
 
     RegisterClass(&wc);
 
-    HWND hwnd = CreateWindowEx(WS_EX_TOOLWINDOW,
+    HWND hwnd = CreateWindowEx(0,
                                CLASS_NAME,
-                               "Kontakt 8 Library Removal Tool",
-                               WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+                               "K8-LRT",
+                               WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
                                CW_USEDEFAULT,
                                CW_USEDEFAULT,
                                300,

@@ -12,7 +12,9 @@ CFLAGS=/W3 /O2 /nologo /DNDEBUG /MT
 LDFLAGS_CONF=/OPT:REF /OPT:ICF
 !ENDIF
 
-LDFLAGS=/link user32.lib gdi32.lib advapi32.lib shell32.lib ole32.lib shlwapi.lib /SUBSYSTEM:WINDOWS $(LDFLAGS_CONF)
+LDFLAGS=/link user32.lib gdi32.lib advapi32.lib shell32.lib \
+    ole32.lib shlwapi.lib comctl32.lib \
+    /SUBSYSTEM:WINDOWS $(LDFLAGS_CONF)
 
 SRC_DIR=src
 RES_DIR=res
@@ -20,7 +22,7 @@ BUILD_DIR=build\$(CONF)
 BIN_DIR=$(BUILD_DIR)\bin
 OBJ_DIR=$(BUILD_DIR)\obj
 
-TARGET=$(BIN_DIR)\K8LibRemovalTool.exe
+TARGET=$(BIN_DIR)\K8-LRT.exe
 SOURCES=$(SRC_DIR)\main.c
 OBJECTS=$(OBJ_DIR)\main.obj $(OBJ_DIR)\app.res
 
