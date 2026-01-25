@@ -16,7 +16,7 @@ Locations that need to be searched and deleted:
 
 ## Install
 
-The latest version of K8-LRT is v0.3.0 - you can [download it here](https://github.com/jakerieger/K8-LRT/releases/latest).
+The latest version of K8-LRT is v1.0.0 - you can [download it here](https://github.com/jakerieger/K8-LRT/releases/latest).
 
 ## Changelog
 
