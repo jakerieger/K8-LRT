@@ -212,28 +212,12 @@ void arena_clear(void) {
 //                   -- UI ELEMENT DEFINITIONS --                     //
 //====================================================================//
 
-// Main window
-#define IDC_LISTBOX 101
-#define IDC_REMOVE_BUTTON 102
-#define IDC_REMOVE_ALL_BUTTON 103
-#define IDC_CHECKBOX_BACKUP 104
-
-// Menu bar
-#define ID_FILE_VIEW_LOG 201
-#define ID_FILE_RELOAD_LIBRARIES 202
-#define ID_FILE_EXIT 203
-#define ID_HELP_CHECK_UPDATES 204
-#define ID_HELP_ABOUT 205
-
-// Log viewer edit
-#define IDC_LOGVIEW_EDIT 301
-
-#define IDI_APPICON 501
+#include "resource.h"
 
 static HWND H_LISTBOX           = NULL;
 static HWND H_REMOVE_BUTTON     = NULL;
 static HWND H_REMOVE_ALL_BUTTON = NULL;
-static HWND H_BACKUP_CHECKBOX   = NULL;  // Whether or not we should backup delete files
+static HWND H_BACKUP_CHECKBOX   = NULL;  // Whether or not we should backup delete filesa
 static HWND H_LOG_VIEWER        = NULL;
 
 //====================================================================//
@@ -927,6 +911,45 @@ LRESULT CALLBACK log_viewer_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM lpa
     return DefWindowProc(hwnd, umsg, wparam, lparam);
 }
 
+INT_PTR CALLBACK about_dialog_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM lparam) {
+    switch (umsg) {
+        case WM_NOTIFY: {
+            LPNMHDR pnmh = (LPNMHDR)lparam;
+            if (pnmh->idFrom == IDC_REPO_LINK && (pnmh->code == NM_CLICK || pnmh->code == NM_RETURN)) {
+                PNMLINK pnmLink = (PNMLINK)lparam;
+                ShellExecuteW(NULL, L"open", L"https://github.com/jakerieger/K8-LRT", NULL, NULL, SW_SHOWNORMAL);
+                return (INT_PTR)TRUE;
+            }
+            break;
+        }
+
+        case WM_INITDIALOG: {
+            char* latest_v = (char*)lparam;
+            if (latest_v) {
+                char buffer[64] = {'\0'};
+                wsprintfA(buffer, "Version %s", latest_v);
+                SetDlgItemTextA(hwnd, IDC_VER_LABEL, buffer);
+
+                memset(buffer, 0, 64);
+                wsprintfA(buffer, "Build %d", VER_BUILD);
+                SetDlgItemTextA(hwnd, IDC_BUILD_LABEL, buffer);
+            }
+
+            return (INT_PTR)TRUE;
+        }
+
+        case WM_COMMAND:
+            if (LOWORD(wparam) == IDOK || LOWORD(wparam) == IDCANCEL) {
+                EndDialog(hwnd, LOWORD(wparam));
+                return (INT_PTR)TRUE;
+            }
+
+            break;
+    }
+
+    return (INT_PTR)FALSE;
+}
+
 //====================================================================//
 //                      -- INPUT CALLBACKS --                         //
 //====================================================================//
@@ -1225,7 +1248,10 @@ void on_check_for_updates(HWND hwnd) {
     }
 }
 
-void on_about(HWND hwnd) {}
+void on_about(HWND hwnd) {
+    const char* version = VER_PRODUCTVERSION_STR;
+    DialogBoxParam(GetModuleHandle(NULL), MAKEINTRESOURCE(IDD_ABOUTBOX), hwnd, about_dialog_proc, (LPARAM)version);
+}
 
 //====================================================================//
 //                      -- WINDOW CALLBACK --                         //

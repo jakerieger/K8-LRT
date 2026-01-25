@@ -1,11 +1,36 @@
 #include <windows.h>
+#include <winres.h>
+#include <CommCtrl.h>
+
+#include "../src/resource.h"
 #include "../src/version.h"
+
+#ifndef IDC_STATIC
+#define IDC_STATIC (-1)
+#endif
+
 #define CREATEPROCESS_MANIFEST_RESOURCE_ID 1
 #define RT_MANIFEST 24
 
-#define IDI_APPICON 501
 IDI_APPICON ICON "icon.ico"
 
+IDD_ABOUTBOX DIALOGEX 0, 0, 180, 110
+STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "About K8-LRT"
+FONT 9, "Segoe UI"
+BEGIN
+    ICON            IDI_APPICON, IDC_STATIC, 82, 15, 21, 20
+    LTEXT           VER_PRODUCTNAME_STR, IDC_STATIC, 0, 45, 180, 10, SS_CENTER
+    LTEXT           "Version", IDC_VER_LABEL, 0, 56, 180, 10, SS_CENTER
+    LTEXT           "Build", IDC_BUILD_LABEL, 0, 67, 180, 10, SS_CENTER
+    CONTROL         "<a>https://github.com/jakerieger/K8-LRT</a>", IDC_REPO_LINK, "SysLink", WS_TABSTOP, 35, 88, 130, 10
+END
+
+//=============================================================================//
+//                         --- VERSION METADATA ---                            //
+//=============================================================================//
+
+// Enables modern UI and enforces administrator privileges
 CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "manifest.xml"
 
 VS_VERSION_INFO VERSIONINFO
