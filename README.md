@@ -63,7 +63,7 @@ The official 1.0 release of K8-LRT.
 
 ## Building
 
-K8-LRT is written in pure C using the Windows API. The entire program is just under 900 lines of code and the executable is only about 270 Kb. 
+K8-LRT is written in pure C using the Windows API. The entire program is just over 1400 lines of code and the executable is only about 300 Kb. 
 
 K8-LRT can be compiled via `nmake`, which is included with the MSVC toolchain. This requires the C++ Visual Studio toolsuite to be installed. If it is, you can simply run the build script from PowerShell to build K8-LRT:
 
