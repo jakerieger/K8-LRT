@@ -114,7 +114,7 @@ void log_msg(log_level level, const char* fmt, ...) {
 }
 
 void log_init(HWND hwnd, const char* filename) {
-    errno_t result = fopen_s(&LOG_FILE, filename, "a");  // append mode
+    errno_t result = fopen_s(&LOG_FILE, filename, "a+");  // append (+ read) mode
     if (result == 0) {
         log_msg(LOG_INFO, "--- K8-LRT Started ---");
     } else {
@@ -212,17 +212,29 @@ void arena_clear() {
 //                   -- UI ELEMENT DEFINITIONS --                     //
 //====================================================================//
 
+// Main window
 #define IDC_LISTBOX 101
 #define IDC_REMOVE_BUTTON 102
 #define IDC_REMOVE_ALL_BUTTON 103
 #define IDC_CHECKBOX_BACKUP 104
 
+// Menu bar
+#define ID_FILE_VIEW_LOG 201
+#define ID_FILE_RELOAD_LIBRARIES 202
+#define ID_FILE_EXIT 203
+#define ID_HELP_CHECK_UPDATES 204
+#define ID_HELP_ABOUT 205
+
+// Log viewer edit
+#define IDC_LOGVIEW_EDIT 301
+
 #define IDI_APPICON 501
 
-static HWND H_LISTBOX;
-static HWND H_REMOVE_BUTTON;
-static HWND H_REMOVE_ALL_BUTTON;
-static HWND H_BACKUP_CHECKBOX;  // Whether or not we should backup delete files
+static HWND H_LISTBOX           = NULL;
+static HWND H_REMOVE_BUTTON     = NULL;
+static HWND H_REMOVE_ALL_BUTTON = NULL;
+static HWND H_BACKUP_CHECKBOX   = NULL;  // Whether or not we should backup delete files
+static HWND H_LOG_VIEWER        = NULL;
 
 //====================================================================//
 //                          -- GLOBALS --                             //
@@ -239,10 +251,11 @@ static HWND H_BACKUP_CHECKBOX;  // Whether or not we should backup delete files
 #define _LIB_CACHE_ROOT "Native Instruments\\Kontakt 8\\LibrariesCache\0"
 #define _DB3_ROOT "Native Instruments\\Kontakt 8\\komplete.db3\0"
 
-static char** LIBRARIES   = {NULL};
-static int LIB_COUNT      = 0;
-static int SELECTED_INDEX = -1;
-static BOOL BACKUP_FILES  = TRUE;
+static char** LIBRARIES    = {NULL};
+static int LIB_COUNT       = 0;
+static int SELECTED_INDEX  = -1;
+static BOOL BACKUP_FILES   = TRUE;
+static BOOL INITIAL_SEARCH = TRUE;
 
 // Exclusion list - NI products that aren't libraries
 static char* EXCLUSION_LIST[] = {
@@ -431,7 +444,7 @@ void clear_libraries() {
     LIB_COUNT      = 0;
 }
 
-BOOL query_libraries() {
+BOOL query_libraries(HWND hwnd) {
     clear_libraries();
 
     HKEY h_key;
@@ -481,6 +494,14 @@ BOOL query_libraries() {
     LIBRARIES[LIB_COUNT] = NULL;
 
     _INFO("Finished querying registry entries (found %d library entries)", LIB_COUNT);
+
+    if (INITIAL_SEARCH) {
+        INITIAL_SEARCH = FALSE;
+    } else {
+        char msg[256] = {'\0'};
+        snprintf(msg, 256, "Found %d installed libraries", LIB_COUNT);
+        MessageBox(hwnd, msg, "K8-LRT", MB_OK | MB_ICONINFORMATION);
+    }
 
     return TRUE;
 }
@@ -623,16 +644,147 @@ BOOL remove_selected_library() {
 }
 
 //====================================================================//
+//                      -- DIALOG CALLBACKS --                        //
+//====================================================================//
+
+LRESULT CALLBACK log_viewer_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM lparam) {
+    switch (umsg) {
+        case WM_CREATE: {
+            HWND h_edit = CreateWindowEx(WS_EX_CLIENTEDGE,
+                                         "EDIT",
+                                         NULL,
+                                         WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL | ES_MULTILINE | ES_READONLY |
+                                           ES_AUTOVSCROLL | ES_AUTOHSCROLL,
+                                         0,
+                                         0,
+                                         0,
+                                         0,
+                                         hwnd,
+                                         (HMENU)IDC_LOGVIEW_EDIT,
+                                         GetModuleHandle(NULL),
+                                         NULL);
+
+            HFONT h_font = CreateFont(14,
+                                      0,
+                                      0,
+                                      0,
+                                      FW_NORMAL,
+                                      FALSE,
+                                      FALSE,
+                                      FALSE,
+                                      DEFAULT_CHARSET,
+                                      OUT_DEFAULT_PRECIS,
+                                      CLIP_DEFAULT_PRECIS,
+                                      DEFAULT_QUALITY,
+                                      FIXED_PITCH | FF_MODERN,
+                                      "Consolas");
+
+            SendMessage(h_edit, WM_SETFONT, (WPARAM)h_font, TRUE);
+
+            if (LOG_FILE) {
+                int current_pos = ftell(LOG_FILE);
+
+                fseek(LOG_FILE, 0, SEEK_END);
+                int file_size = ftell(LOG_FILE);
+                fseek(LOG_FILE, 0, SEEK_SET);
+
+                char* buffer = (char*)malloc(file_size + 1);
+                if (buffer) {
+                    size_t bytes_read  = fread(buffer, 1, file_size, LOG_FILE);
+                    buffer[bytes_read] = '\0';
+
+                    // Convert LF to CRLF for Windows Edit control
+                    size_t lf_count = 0;
+                    for (size_t i = 0; i < bytes_read; i++) {
+                        if (buffer[i] == '\n' && (i == 0 || buffer[i - 1] != '\r')) {
+                            lf_count++;
+                        }
+                    }
+
+                    char* crlf_buffer = (char*)malloc(bytes_read + lf_count + 1);
+                    if (crlf_buffer) {
+                        size_t j = 0;
+                        for (size_t i = 0; i < bytes_read; i++) {
+                            if (buffer[i] == '\n' && (i == 0 || buffer[i - 1] != '\r')) {
+                                crlf_buffer[j++] = '\r';
+                            }
+                            crlf_buffer[j++] = buffer[i];
+                        }
+                        crlf_buffer[j] = '\0';
+
+                        SetWindowTextA(h_edit, crlf_buffer);
+
+                        // Scroll to bottom
+                        SendMessage(h_edit, EM_SETSEL, 0, -1);
+                        SendMessage(h_edit, EM_SETSEL, -1, -1);
+                        SendMessage(h_edit, EM_SCROLLCARET, 0, 0);
+
+                        free(crlf_buffer);
+                    }
+
+                    free(buffer);
+                }
+
+                fseek(LOG_FILE, current_pos, SEEK_SET);  // Restore position for appending
+            } else {
+                SetWindowTextA(h_edit, "Log file not available.");
+            }
+
+            return 0;
+        }
+
+        case WM_SIZE: {
+            HWND h_edit = GetDlgItem(hwnd, IDC_LOGVIEW_EDIT);
+            if (h_edit) {
+                RECT rect;
+                GetClientRect(hwnd, &rect);
+                SetWindowPos(h_edit, NULL, 0, 0, rect.right, rect.bottom, SWP_NOZORDER);
+            }
+            return 0;
+        }
+
+        case WM_CLOSE: {
+            DestroyWindow(hwnd);
+            return 0;
+        }
+
+        case WM_DESTROY: {
+            H_LOG_VIEWER = NULL;
+            return 0;
+        }
+    }
+
+    return DefWindowProc(hwnd, umsg, wparam, lparam);
+}
+
+//====================================================================//
 //                      -- INPUT CALLBACKS --                         //
 //====================================================================//
 
 LRESULT on_create(HWND hwnd) {
+    HMENU h_menubar   = CreateMenu();
+    HMENU h_file_menu = CreateMenu();
+    HMENU h_help_menu = CreateMenu();
+
+    AppendMenu(h_file_menu, MF_STRING, ID_FILE_VIEW_LOG, "&View Log");
+    AppendMenu(h_file_menu, MF_STRING, ID_FILE_RELOAD_LIBRARIES, "&Reload Libraries");
+    AppendMenu(h_file_menu, MF_SEPARATOR, 0, NULL);
+    AppendMenu(h_file_menu, MF_STRING, ID_FILE_EXIT, "E&xit");
+
+    AppendMenu(h_help_menu, MF_STRING, ID_HELP_CHECK_UPDATES, "&Check for Updates");
+    AppendMenu(h_help_menu, MF_STRING, ID_HELP_ABOUT, "&About");
+
+    AppendMenu(h_menubar, MF_POPUP, (UINT_PTR)h_file_menu, "&File");
+    AppendMenu(h_menubar, MF_POPUP, (UINT_PTR)h_help_menu, "&Help");
+
+    SetMenu(hwnd, h_menubar);
+
     H_LISTBOX = CreateWindowEx(WS_EX_CLIENTEDGE,
                                "LISTBOX",
                                NULL,
                                WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY,
                                10,
-                               56,
+                               36,
                                265,
                                240,
                                hwnd,
@@ -645,7 +797,7 @@ LRESULT on_create(HWND hwnd) {
                                        "Backup files before deleting",
                                        WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX,
                                        10,
-                                       280,
+                                       260,
                                        220,
                                        20,
                                        hwnd,
@@ -658,7 +810,7 @@ LRESULT on_create(HWND hwnd) {
                                          "Remove All",
                                          WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                                          10,
-                                         310,
+                                         290,
                                          130,
                                          30,
                                          hwnd,
@@ -671,7 +823,7 @@ LRESULT on_create(HWND hwnd) {
                                      "Remove Selected",
                                      WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_DISABLED,
                                      147,
-                                     310,
+                                     290,
                                      130,
                                      30,
                                      hwnd,
@@ -702,7 +854,7 @@ LRESULT on_create(HWND hwnd) {
     SendMessage(H_BACKUP_CHECKBOX, BM_SETCHECK, (WPARAM)TRUE, TRUE);
 
     // Search registry for key entries in `HKEY_LOCAL_MACHINE/SOFTWARE/Native Instruments/..`
-    BOOL query_result = query_libraries();
+    BOOL query_result = query_libraries(hwnd);
     if (!query_result) {
         MessageBox(hwnd,
                    "Failed to query libraries. Do you have any Kontakt libraries installed?\n\nCheck "
@@ -719,7 +871,7 @@ LRESULT on_create(HWND hwnd) {
                                 label_text,
                                 WS_CHILD | WS_VISIBLE | SS_LEFT,
                                 10,
-                                35,
+                                10,
                                 265,
                                 20,
                                 hwnd,
@@ -753,7 +905,7 @@ void on_remove_selected(HWND hwnd) {
             MessageBox(hwnd, "Failed to remove library", "Error", MB_OK | MB_ICONERROR);
             return;
         } else {
-            BOOL query_result = query_libraries();
+            BOOL query_result = query_libraries(hwnd);
             if (query_result) {
                 EnableWindow(H_REMOVE_BUTTON, FALSE);
                 MessageBox(hwnd, "Successfully removed library.", "Success", MB_OK | MB_ICONINFORMATION);
@@ -788,7 +940,7 @@ void on_remove_all(HWND hwnd) {
             i++;
         }
 
-        BOOL query_result = query_libraries();
+        BOOL query_result = query_libraries(hwnd);
         if (query_result) {
             EnableWindow(H_REMOVE_BUTTON, FALSE);
             MessageBox(hwnd, "Successfully removed all libraries.", "Success", MB_OK | MB_ICONINFORMATION);
@@ -803,6 +955,66 @@ void on_remove_all(HWND hwnd) {
         }
     }
 }
+
+void on_view_log(HWND hwnd) {
+    if (H_LOG_VIEWER && IsWindow(H_LOG_VIEWER)) {
+        SetForegroundWindow(H_LOG_VIEWER);
+        return;
+    }
+
+    WNDCLASS wc      = {0};
+    wc.lpfnWndProc   = log_viewer_proc;
+    wc.hInstance     = GetModuleHandle(NULL);
+    wc.lpszClassName = "K8LRT_LogViewer";
+    wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    wc.hIcon         = LoadIcon(GetModuleHandle(NULL), MAKEINTRESOURCE(IDI_APPICON));
+
+    if (!GetClassInfo(GetModuleHandle(NULL), "K8LRT_LogViewer", &wc)) {
+        RegisterClass(&wc);
+    }
+
+    H_LOG_VIEWER = CreateWindowEx(WS_EX_TOOLWINDOW,
+                                  "K8LRT_LogViewer",
+                                  "Log",
+                                  WS_OVERLAPPEDWINDOW,
+                                  CW_USEDEFAULT,
+                                  CW_USEDEFAULT,
+                                  600,
+                                  400,
+                                  hwnd,
+                                  NULL,
+                                  GetModuleHandle(NULL),
+                                  NULL);
+
+    if (H_LOG_VIEWER) {
+        ShowWindow(H_LOG_VIEWER, SW_SHOW);
+    } else {
+        MessageBox(hwnd, "Failed to create log viewer window.", "Error", MB_OK | MB_ICONERROR);
+    }
+}
+
+void on_reload_libraries(HWND hwnd) {
+    int response =
+      MessageBox(hwnd, "Clear found libraries and search again?", "Confirm Reload", MB_YESNO | MB_ICONQUESTION);
+    if (response == IDYES) {
+        BOOL query_result = query_libraries(hwnd);
+        if (!query_result) {
+            MessageBox(hwnd, "Failed to query libraries. Are you admin?", "Error querying", MB_OK | MB_ICONERROR);
+        }
+    }
+}
+
+void on_exit(HWND hwnd) {
+    int response = MessageBox(hwnd, "Are you sure you want exit?", "Confirm Exit", MB_YESNO | MB_ICONQUESTION);
+    if (response == IDYES) {
+        PostQuitMessage(0);
+    }
+}
+
+void on_check_for_updates(HWND hwnd) {}
+
+void on_about(HWND hwnd) {}
 
 //====================================================================//
 //                      -- WINDOW CALLBACK --                         //
@@ -835,6 +1047,31 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM lparam) {
 
         case WM_COMMAND: {
             switch (LOWORD(wparam)) {
+                case ID_FILE_VIEW_LOG: {
+                    on_view_log(hwnd);
+                    break;
+                }
+
+                case ID_FILE_RELOAD_LIBRARIES: {
+                    on_reload_libraries(hwnd);
+                    break;
+                }
+
+                case ID_FILE_EXIT: {
+                    on_exit(hwnd);
+                    break;
+                }
+
+                case ID_HELP_CHECK_UPDATES: {
+                    on_check_for_updates(hwnd);
+                    break;
+                }
+
+                case ID_HELP_ABOUT: {
+                    on_about(hwnd);
+                    break;
+                }
+
                 case IDC_REMOVE_ALL_BUTTON: {
                     on_remove_all(hwnd);
                     break;
