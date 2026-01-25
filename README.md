@@ -20,6 +20,23 @@ The latest version of K8-LRT is v0.3.0 - you can [download it here](https://gith
 
 ## Changelog
 
+### 1.0.0 (January 25, 2026)
+
+The official 1.0 release of K8-LRT.
+
+#### Added
+- Update checking
+- Log viewer
+- Manually reload libraries
+
+#### Changed
+- Updated UI look to modern Windows
+
+#### Fixed
+- Memory leak constructing path strings
+- Inconsistent naming
+- Small bug fixes with file I/O
+
 ### 0.3.1 (January 23, 2026)
 
 - Improved memory management model

@@ -32,11 +32,11 @@
 
     REVISION HISTORY
 
-        1.0.0  (TBD)        UI redux, added functionality, updates
-        0.3.1  (2026-01-23) memory model improvements
-        0.3.0  (2026-01-23) sweeping code changes, bug fixes, and logging
-        0.2.0  (2026-01-23) tons of bug fixes and code improvements
-        0.1.0  (2026-01-22) initial release of K8-LRT
+        1.0.0  (2026-01-25)  UI redux, added functionality, updates
+        0.3.1  (2026-01-23)  memory model improvements
+        0.3.0  (2026-01-23)  sweeping code changes, bug fixes, and logging
+        0.2.0  (2026-01-23)  tons of bug fixes and code improvements
+        0.1.0  (2026-01-22)  initial release of K8-LRT
 */
 
 #include "version.h"

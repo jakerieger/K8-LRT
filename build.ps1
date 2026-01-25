@@ -1,5 +1,6 @@
 param (
-    [string]$Config # "debug" or "release"
+    [string]$Config = "debug",  # "debug" or "release"
+    [switch]$IncrementBuild     # Whether or not to increment the build number in version.h
 )
 
 # Load Visual Studio environment
@@ -10,17 +11,19 @@ Enter-VsDevShell -VsInstallPath $vsPath -SkipAutomaticLocation -Arch amd64 -Host
 Write-Host "Visual Studio Environment Active." -ForegroundColor Cyan
 
 # Increment build number
-Write-Host "Incrementing build number..." -ForegroundColor Cyan
-$version_header = "src/version.h"
-$header_content = Get-Content $version_header -Raw
-$pattern = '(?m)(#define\s+VER_BUILD\s+)(\d+)'
-$new_content = [regex]::Replace($header_content, $pattern, {
-        param($m) 
-        $prefix = $m.Groups[1].Value
-        $value = [int]$m.Groups[2].Value + 1
-        return "${prefix}${value}"
-    })
-Set-Content -Path $version_header -Value $new_content -Encoding UTF8
+if ($IncrementBuild) {
+    Write-Host "Incrementing build number..." -ForegroundColor Cyan
+    $version_header = "src/version.h"
+    $header_content = Get-Content $version_header -Raw
+    $pattern = '(?m)(#define\s+VER_BUILD\s+)(\d+)'
+    $new_content = [regex]::Replace($header_content, $pattern, {
+            param($m) 
+            $prefix = $m.Groups[1].Value
+            $value = [int]$m.Groups[2].Value + 1
+            return "${prefix}${value}"
+        })
+    Set-Content -Path $version_header -Value $new_content -Encoding UTF8
+}
 
 # Build K8-LRT
 Write-Host "Running nmake..." -ForegroundColor Cyan

@@ -4,7 +4,7 @@
 #define VER_MAJOR               1
 #define VER_MINOR               0
 #define VER_PATCH               0
-#define VER_BUILD               80
+#define VER_BUILD               81
 
 #define VER_FILEVERSION         VER_MAJOR,VER_MINOR,VER_PATCH,VER_BUILD
 #define VER_FILEVERSION_STR     "1.0.0.0\0"
@@ -20,6 +20,7 @@
 #define VER_REPO_STR "https://github.com/jakerieger/K8-LRT\0"
 
 #endif // VERSION_H
+
 
 
 
