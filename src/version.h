@@ -1,15 +1,15 @@
 #ifndef VERSION_H
 #define VERSION_H
 
-#define VER_MAJOR               0
-#define VER_MINOR               4
+#define VER_MAJOR               1
+#define VER_MINOR               0
 #define VER_PATCH               0
 #define VER_BUILD               0
 
 #define VER_FILEVERSION         VER_MAJOR,VER_MINOR,VER_PATCH,VER_BUILD
-#define VER_FILEVERSION_STR     "0.4.0.0\0"
+#define VER_FILEVERSION_STR     "1.0.0.0\0"
 #define VER_PRODUCTVERSION      VER_MAJOR,VER_MINOR,VER_PATCH,VER_BUILD
-#define VER_PRODUCTVERSION_STR  "0.4.0\0"
+#define VER_PRODUCTVERSION_STR  "1.0.0\0"
 
 #define VER_COMPANYNAME_STR         "Jake Rieger\0"
 #define VER_FILEDESCRIPTION_STR     "Kontakt 8 Library Removal Tool\0"

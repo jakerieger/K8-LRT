@@ -1,5 +1,5 @@
 /*
-    K8-LRT - v0.4.0 - Library removal tool for Bobdule's Kontakt 8
+    K8-LRT - v1.0.0 - Library removal tool for Bobdule's Kontakt 8
 
     LICENSE
 
@@ -32,7 +32,7 @@
 
     REVISION HISTORY
 
-        0.4.0  (2026-01-24) UI redux, added functionality
+        1.0.0  (TBD)        UI redux, added functionality, updates
         0.3.1  (2026-01-23) memory model improvements
         0.3.0  (2026-01-23) sweeping code changes, bug fixes, and logging
         0.2.0  (2026-01-23) tons of bug fixes and code improvements
@@ -43,14 +43,14 @@
 
 #include <stdio.h>
 #include <stdarg.h>
-#include <windows.h>
-#include <winerror.h>
-#include <winnt.h>
-#include <winreg.h>
-#include <shlobj.h>
-#include <Shlwapi.h>
-#include <winuser.h>
-#include <CommCtrl.h>
+#include <windows.h>   // Core Windows API
+#include <winerror.h>  // Windows error API
+#include <winreg.h>    // Registry API
+#include <Shlwapi.h>   // Shell API
+#include <shlobj.h>    // More Shell API
+#include <winuser.h>   // Dialogs and display
+#include <CommCtrl.h>  // For modern Windows styling (Common Controls)
+#include <winhttp.h>   // For checking for updates
 
 //====================================================================//
 //                          -- LOGGING --                             //
@@ -123,7 +123,7 @@ void log_init(HWND hwnd, const char* filename) {
     }
 }
 
-void log_close() {
+void log_close(void) {
     if (LOG_FILE) {
         log_msg(LOG_INFO, "--- K8-LRT Stopped ---");
         fclose(LOG_FILE);
@@ -168,7 +168,7 @@ void arena_init(UINT64 capacity) {
     ARENA->capacity = capacity;
 }
 
-void arena_destroy() {
+void arena_destroy(void) {
     free(ARENA);
 }
 
@@ -200,7 +200,7 @@ void arena_pop_to(UINT64 position) {
     arena_pop(size);
 }
 
-void arena_clear() {
+void arena_clear(void) {
     arena_pop_to(_ARENA_BASE);
 }
 
@@ -244,6 +244,11 @@ static HWND H_LOG_VIEWER        = NULL;
 #define _WINDOW_H 390
 #define _WINDOW_CLASS "K8LRT_WindowClass\0"
 #define _WINDOW_TITLE "K8-LRT - v" VER_PRODUCTVERSION_STR
+
+#define _LOGVIEW_W 600
+#define _LOGVIEW_H 400
+#define _LOGVIEW_CLASS "K8LRT_LogView\0"
+#define _LOGVIEW_TITLE "Log\0"
 
 #define _STREQ(s1, s2) strcmp(s1, s2) == 0
 #define _IS_CHECKED(checkbox) (SendMessage(checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED)
@@ -312,6 +317,9 @@ static char* EXCLUSION_PATTERNS[] = {
   NULL,
 };
 
+#define _GITHUB_OWNER "jakerieger\0"
+#define _GITHUB_REPO "K8-LRT\0"
+
 //====================================================================//
 //                      -- HELPER FUNCTIONS --                        //
 //====================================================================//
@@ -322,7 +330,7 @@ static char* EXCLUSION_PATTERNS[] = {
         quick_exit(1);                                                                                                 \
     } while (FALSE)
 
-char* get_local_appdata_path() {
+char* get_local_appdata_path(void) {
     PWSTR psz_path = NULL;
 
     HRESULT hr = SHGetKnownFolderPath(&FOLDERID_LocalAppData, 0, NULL, &psz_path);
@@ -404,7 +412,7 @@ BOOL matches_pattern_in_list(char* patterns[], const char* needle) {
 }
 
 // Enable registry key backups
-void enable_backup_privilege() {
+void enable_backup_privilege(void) {
     HANDLE h_token;
     TOKEN_PRIVILEGES tp;
     LUID luid;
@@ -423,7 +431,7 @@ void enable_backup_privilege() {
     }
 }
 
-void clear_libraries() {
+void clear_libraries(void) {
     if (ARENA->position > _ARENA_BASE) {
         arena_clear();
     }
@@ -636,11 +644,173 @@ BOOL remove_library(const char* name) {
     return TRUE;
 }
 
-BOOL remove_selected_library() {
+BOOL remove_selected_library(void) {
     if (SELECTED_INDEX == -1)
         return FALSE;
 
     return remove_library(LIBRARIES[SELECTED_INDEX]);
+}
+
+// Extract tag name from GitHub json response
+char* extract_tag_name(const char* json) {
+    const char* tag_start = strstr(json, "\"tag_name\"");
+    if (!tag_start)
+        return NULL;
+
+    const char* value_start = strchr(tag_start, ':');
+    if (!value_start)
+        return NULL;
+
+    value_start = strchr(value_start, '"');
+    if (!value_start)
+        return NULL;
+    value_start++;
+
+    const char* value_end = strchr(value_start, '"');
+    if (!value_end)
+        return NULL;
+
+    size_t len = value_end - value_start;
+    char* tag  = _ALLOC_STR(len + 1);
+    strncpy_s(tag, len + 1, value_start, len);
+    tag[len] = '\0';
+
+    return tag;
+}
+
+// Compares version numbers (strips 'v' prefix if present).
+// Returns 0 if versions match
+int compare_versions(const char* v1, const char* v2) {
+    int major1 = 0, minor1 = 0, patch1 = 0;
+    int major2 = 0, minor2 = 0, patch2 = 0;
+
+    // Skip 'v' prefix if present
+    if (v1[0] == 'v')
+        v1++;
+    if (v2[0] == 'v')
+        v2++;
+
+    sscanf_s(v1, "%d.%d.%d", &major1, &minor1, &patch1);
+    sscanf_s(v2, "%d.%d.%d", &major2, &minor2, &patch2);
+
+    if (major1 != major2)
+        return major1 - major2;
+    if (minor1 != minor2)
+        return minor1 - minor2;
+    return patch1 - patch2;
+}
+
+// Fetch the latest version of K8-LRT from the GitHub API
+char* get_latest_version(void) {
+    HINTERNET h_session   = NULL;
+    HINTERNET h_connect   = NULL;
+    HINTERNET h_request   = NULL;
+    char* latest_version  = NULL;
+    char* response_data   = NULL;
+    DWORD bytes_available = 0;
+    DWORD bytes_read      = 0;
+    DWORD total_size      = 0;
+    BOOL result           = FALSE;
+
+    h_session =
+      WinHttpOpen(L"K8-LRT/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!h_session) {
+        _ERROR("WinHttpOpen failed: %lu", GetLastError());
+        goto cleanup;
+    }
+
+    h_connect = WinHttpConnect(h_session, L"api.github.com", INTERNET_DEFAULT_HTTPS_PORT, 0);
+    if (!h_connect) {
+        _ERROR("WinHttpConnect failed: %lu", GetLastError());
+        goto cleanup;
+    }
+
+    h_request = WinHttpOpenRequest(h_connect,
+                                   L"GET",
+                                   L"/repos/jakerieger/K8-LRT/releases/latest",
+                                   NULL,
+                                   WINHTTP_NO_REFERER,
+                                   WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                   WINHTTP_FLAG_SECURE);
+    if (!h_request) {
+        _ERROR("WinHttpOpenRequest failed: %lu", GetLastError());
+        goto cleanup;
+    }
+
+    LPCWSTR headers = L"User-Agent: K8-LRT/1.0\r\n";
+    WinHttpAddRequestHeaders(h_request, headers, -1L, WINHTTP_ADDREQ_FLAG_ADD);
+
+    result = WinHttpSendRequest(h_request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+    if (!result) {
+        _ERROR("WinHttpReceiveResponse failed: %lu", GetLastError());
+        goto cleanup;
+    }
+
+    result = WinHttpReceiveResponse(h_request, NULL);
+    if (!result) {
+        _ERROR("WinHttpReceiveResponse failed: %lu", GetLastError());
+        goto cleanup;
+    }
+
+    DWORD status_code      = 0;
+    DWORD status_code_size = sizeof(status_code);
+    WinHttpQueryHeaders(h_request,
+                        WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                        NULL,
+                        &status_code,
+                        &status_code_size,
+                        NULL);
+    if (status_code != 200) {
+        _ERROR("HTTP request failed with status code: %lu", status_code);
+        goto cleanup;
+    }
+
+    response_data = (char*)malloc(1);
+    if (!response_data)
+        goto cleanup;
+    response_data[0] = '\0';
+
+    // Read the response data
+    do {
+        bytes_available = 0;
+        if (!WinHttpQueryDataAvailable(h_request, &bytes_available)) {
+            _ERROR("WinHttpQueryDataAvailable failed: %lu", GetLastError());
+            break;
+        }
+
+        if (bytes_available == 0)
+            break;
+
+        char* tmp = (char*)realloc(response_data, total_size + bytes_available + 1);
+        if (!tmp) {
+            _ERROR("Memory allocation failed");
+            break;
+        }
+        response_data = tmp;
+
+        if (!WinHttpReadData(h_request, response_data + total_size, bytes_available, &bytes_read)) {
+            _ERROR("WinHttpReadData failed: %lu", GetLastError());
+            break;
+        }
+
+        total_size += bytes_read;
+        response_data[total_size] = '\0';
+
+    } while (bytes_available > 0);
+
+    latest_version = extract_tag_name(response_data);
+
+cleanup:
+    if (response_data)
+        free(response_data);
+    if (h_request)
+        WinHttpCloseHandle(h_request);
+    if (h_connect)
+        WinHttpCloseHandle(h_connect);
+    if (h_session)
+        WinHttpCloseHandle(h_session);
+
+    return latest_version;
 }
 
 //====================================================================//
@@ -965,23 +1135,32 @@ void on_view_log(HWND hwnd) {
     WNDCLASS wc      = {0};
     wc.lpfnWndProc   = log_viewer_proc;
     wc.hInstance     = GetModuleHandle(NULL);
-    wc.lpszClassName = "K8LRT_LogViewer";
+    wc.lpszClassName = _LOGVIEW_CLASS;
     wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     wc.hIcon         = LoadIcon(GetModuleHandle(NULL), MAKEINTRESOURCE(IDI_APPICON));
 
-    if (!GetClassInfo(GetModuleHandle(NULL), "K8LRT_LogViewer", &wc)) {
+    if (!GetClassInfo(GetModuleHandle(NULL), _LOGVIEW_CLASS, &wc)) {
         RegisterClass(&wc);
     }
 
+    RECT parent_rect;
+    GetWindowRect(hwnd, &parent_rect);
+    const int parent_x = parent_rect.left;
+    const int parent_y = parent_rect.top;
+    const int parent_w = parent_rect.right - parent_rect.left;
+    const int parent_h = parent_rect.bottom - parent_rect.top;
+    const int log_x    = parent_x + (parent_w - _LOGVIEW_W) / 2;
+    const int log_y    = parent_y + (parent_h - _LOGVIEW_H) / 2;
+
     H_LOG_VIEWER = CreateWindowEx(WS_EX_TOOLWINDOW,
-                                  "K8LRT_LogViewer",
-                                  "Log",
+                                  _LOGVIEW_CLASS,
+                                  _LOGVIEW_TITLE,
                                   WS_OVERLAPPEDWINDOW,
-                                  CW_USEDEFAULT,
-                                  CW_USEDEFAULT,
-                                  600,
-                                  400,
+                                  log_x,
+                                  log_y,
+                                  _LOGVIEW_W,
+                                  _LOGVIEW_H,
                                   hwnd,
                                   NULL,
                                   GetModuleHandle(NULL),
@@ -1012,7 +1191,39 @@ void on_exit(HWND hwnd) {
     }
 }
 
-void on_check_for_updates(HWND hwnd) {}
+void on_check_for_updates(HWND hwnd) {
+    char* latest_version = get_latest_version();
+    if (!latest_version) {
+        MessageBox(hwnd, "Failed to check for updates.", "Update Check", MB_OK | MB_ICONERROR);
+        return;
+    }
+
+    int comparison = compare_versions(VER_PRODUCTVERSION_STR, latest_version);
+    if (comparison != 0) {
+        char message[512];
+        sprintf_s(message,
+                  512,
+                  "A new version of K8-LRT is available!\n\n"
+                  "Current: %s\n"
+                  "Latest: %s\n\n"
+                  "Visit the GitHub releases page to download?",
+                  VER_PRODUCTVERSION_STR,
+                  latest_version + 1);
+
+        int result = MessageBoxA(NULL, message, "Update Available", MB_YESNO | MB_ICONINFORMATION);
+
+        if (result == IDYES) {
+            ShellExecuteA(NULL,
+                          "open",
+                          "https://github.com/jakerieger/K8-LRT/releases/latest",
+                          NULL,
+                          NULL,
+                          SW_SHOWNORMAL);
+        }
+    } else {
+        MessageBoxA(NULL, "You're running the latest version!", "Up to Date", MB_OK | MB_ICONINFORMATION);
+    }
+}
 
 void on_about(HWND hwnd) {}
 
@@ -1130,12 +1341,18 @@ int WINAPI WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_cmd
 
     RegisterClass(&wc);
 
+    // Calculate screen center point
+    const int screen_w = GetSystemMetrics(SM_CXSCREEN);
+    const int screen_h = GetSystemMetrics(SM_CYSCREEN);
+    const int win_x    = (screen_w - _WINDOW_W) / 2;
+    const int win_y    = (screen_h - _WINDOW_H) / 2;
+
     HWND hwnd = CreateWindowEx(0,
                                _WINDOW_CLASS,
                                _WINDOW_TITLE,
                                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-                               CW_USEDEFAULT,
-                               CW_USEDEFAULT,
+                               win_x,
+                               win_y,
                                _WINDOW_W,
                                _WINDOW_H,
                                NULL,

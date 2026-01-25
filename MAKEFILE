@@ -13,7 +13,7 @@ LDFLAGS_CONF=/OPT:REF /OPT:ICF
 !ENDIF
 
 LDFLAGS=/link user32.lib gdi32.lib advapi32.lib shell32.lib \
-    ole32.lib shlwapi.lib comctl32.lib \
+    ole32.lib shlwapi.lib comctl32.lib winhttp.lib \
     /SUBSYSTEM:WINDOWS $(LDFLAGS_CONF)
 
 SRC_DIR=src
