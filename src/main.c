@@ -1,5 +1,5 @@
 /*
-    K8-LRT - v1.0.0 - Library removal tool for Bobdule's Kontakt 8
+    K8-LRT - v1.1.0 - Library removal tool for Bobdule's Kontakt 8
 
     LICENSE
 
@@ -32,6 +32,7 @@
 
     REVISION HISTORY
 
+        1.1.0  (   TBD    )  additional directory checks and removals
         1.0.0  (2026-01-25)  UI redux, added functionality, updates
         0.3.1  (2026-01-23)  memory model improvements
         0.3.0  (2026-01-23)  sweeping code changes, bug fixes, and logging
@@ -144,22 +145,23 @@ void log_close(void) {
 //                           -- MEMORY --                             //
 //====================================================================//
 
-#define _ARENA_BASE (sizeof(mem_arena))
+#define _ARENA_BASE (sizeof(arena))
 #define _PAGESIZE (sizeof(void*))
 #define _ALIGN_UP(x, align) (((x) + (align) - 1) & ~((align) - 1))
 #define _KB(n) ((UINT64)(n) << 10)
 #define _MB(n) ((UINT64)(n) << 20)
 #define _GB(n) ((UINT64)(n) << 30)
+#define _PROGRAM_MEMORY (_KB(128))  // Define how much memory to give K8-LRT (128 kilobytes)
 
 typedef struct {
     UINT64 capacity;
     UINT64 position;
-} mem_arena;
+} arena;
 
-static mem_arena* ARENA = NULL;
+static arena* ARENA = NULL;
 
 void arena_init(UINT64 capacity) {
-    ARENA = (mem_arena*)malloc(capacity);
+    ARENA = (arena*)malloc(capacity);
     if (!ARENA) {
         _FATAL("Failed to allocate memory");
     }
@@ -237,8 +239,10 @@ static HWND H_LOG_VIEWER        = NULL;
 #define _STREQ(s1, s2) strcmp(s1, s2) == 0
 #define _IS_CHECKED(checkbox) (SendMessage(checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED)
 #define _MAX_LIB_COUNT 512
+
 #define _LIB_CACHE_ROOT "Native Instruments\\Kontakt 8\\LibrariesCache\0"
 #define _DB3_ROOT "Native Instruments\\Kontakt 8\\komplete.db3\0"
+#define _RAS3_ROOT "C:\\Users\\Public\\Documents\\Native Instruments\\Native Access\\ras3\0"
 
 static char** LIBRARIES    = {NULL};
 static int LIB_COUNT       = 0;
@@ -300,9 +304,6 @@ static char* EXCLUSION_PATTERNS[] = {
   "Waves*",
   NULL,
 };
-
-#define _GITHUB_OWNER "jakerieger\0"
-#define _GITHUB_REPO "K8-LRT\0"
 
 //====================================================================//
 //                      -- HELPER FUNCTIONS --                        //
@@ -375,6 +376,15 @@ void attach_console() {
 BOOL file_exists(const char* path) {
     DWORD dw_attrib = GetFileAttributesA(path);
     return (dw_attrib != INVALID_FILE_ATTRIBUTES && !(dw_attrib & FILE_ATTRIBUTE_DIRECTORY));
+}
+
+BOOL has_extension(const char* filename, const char* ext) {
+    const char* extension = strrchr(filename, '.');
+    if (!extension)
+        return FALSE;
+    if (_STREQ(extension, ext))
+        return TRUE;
+    return FALSE;
 }
 
 BOOL list_contains(char* haystack[], const char* needle) {
@@ -498,27 +508,21 @@ BOOL query_libraries(HWND hwnd) {
     return TRUE;
 }
 
-BOOL remove_library(const char* name) {
-    if (!list_contains(LIBRARIES, name)) {
-        _ERROR("No library named '%s' found", name);
-        return FALSE;
-    }
-
+BOOL remove_registry_keys(const char* key) {
     LPCSTR base_path = "SOFTWARE\\Native Instruments";
     HKEY h_key;
 
-    // 1. Remove registry key
     if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, base_path, 0, KEY_ALL_ACCESS, &h_key) == ERROR_SUCCESS) {
         if (BACKUP_FILES) {
             HKEY h_subkey;
-            if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, join_paths(base_path, name), 0, KEY_READ, &h_subkey) ==
+            if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, join_paths(base_path, key), 0, KEY_READ, &h_subkey) ==
                 ERROR_SUCCESS) {
-                char* reg_filename = join_str(name, ".reg");
+                char* reg_filename = join_str(key, ".reg");
                 DeleteFileA(reg_filename);
                 LONG backup_res = RegSaveKeyExA(h_subkey, reg_filename, NULL, REG_LATEST_FORMAT);
 
                 if (backup_res != ERROR_SUCCESS) {
-                    _ERROR("Failed to backup registry entry for key: '%s\\%s'", base_path, name);
+                    _ERROR("Failed to backup registry entry for key: '%s\\%s'", base_path, key);
                     RegCloseKey(h_subkey);
                     return FALSE;
                 }
@@ -527,18 +531,21 @@ BOOL remove_library(const char* name) {
             }
         }
 
-        LONG res = RegDeleteKeyA(h_key, name);
+        LONG res = RegDeleteKeyA(h_key, key);
         if (res != ERROR_SUCCESS) {
-            _ERROR("Failed to delete registry key: '%s\\%s'", base_path, name);
+            _ERROR("Failed to delete registry key: '%s\\%s'", base_path, key);
             RegCloseKey(h_key);
             return FALSE;
         }
 
         RegCloseKey(h_key);
-        _INFO("Removed registry key: '%s\\%s'", base_path, name);
+        _INFO("Removed registry key: '%s\\%s'", base_path, key);
     }
 
-    // 2. Check for .xml files in `C:\Program Files\Common Files\Native Instruments\Service Center`
+    return TRUE;
+}
+
+BOOL remove_xml_file(const char* name) {
     char* prefix   = join_paths("C:\\Program Files\\Common Files\\Native Instruments\\Service Center", name);
     char* filename = join_str(prefix, ".xml");
 
@@ -559,43 +566,45 @@ BOOL remove_library(const char* name) {
         _INFO("Deleted XML file: '%s'", filename);
     }
 
-    // 3. Check for cache file in `~\AppData\Local\Native Instruments\Kontakt 8\LibrariesCache`
-    // This one is tough. Cache files are binary formats and filenames appear to be hashes of some kind.
-    // For now we'll just delete all of the cache files because they don't seem to play a significant role
-    char* appdata_local = get_local_appdata_path();
+    return TRUE;
+}
+
+BOOL remove_all_files_in_dir(const char* directory, BOOL backup) {
     WIN32_FIND_DATA find_data;
     HANDLE h_find = INVALID_HANDLE_VALUE;
     char search_path[MAX_PATH];
     char file_path[MAX_PATH];
 
-    char* cache_path = join_paths(appdata_local, _LIB_CACHE_ROOT);
-    snprintf(search_path, MAX_PATH, "%s\\*", cache_path);
+    snprintf(search_path, MAX_PATH, "%s\\*", directory);
     h_find = FindFirstFile(search_path, &find_data);
     if (h_find != INVALID_HANDLE_VALUE) {
         do {
             // Skip the special directory entries '.' and '..'
             if (strcmp(find_data.cFileName, ".") != 0 && strcmp(find_data.cFileName, "..") != 0) {
-                snprintf(file_path, MAX_PATH, "%s\\%s", cache_path, find_data.cFileName);
+                snprintf(file_path, MAX_PATH, "%s\\%s", directory, find_data.cFileName);
 
                 if (!(find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-                    if (BACKUP_FILES) {
+                    if (backup) {
                         char* bak_filename = join_str(file_path, ".bak");
                         if (file_exists(bak_filename)) {
                             BOOL deleted = DeleteFileA(bak_filename);
                             if (!deleted) {
-                                _ERROR("Failed to delete backup file: '%s'", bak_filename);
+                                _ERROR("Failed to delete file: '%s'", bak_filename);
+                                return FALSE;
                             }
                         }
                         BOOL copied = CopyFileExA(file_path, bak_filename, NULL, NULL, NULL, 0);
                         if (!copied) {
-                            _ERROR("Failed to backup cache file: '%s'", file_path);
+                            _ERROR("Failed to backup file: '%s'", file_path);
+                            return FALSE;
                         }
                     }
 
                     if (!DeleteFile(file_path)) {
-                        _ERROR("Failed to delete cache file: '%s'", file_path);
+                        _ERROR("Failed to delete file: '%s'", file_path);
+                        return FALSE;
                     } else {
-                        _INFO("Deleted cache file: '%s'", file_path);
+                        _INFO("Deleted file: '%s'", file_path);
                     }
                 }
             }
@@ -603,8 +612,17 @@ BOOL remove_library(const char* name) {
         FindClose(h_find);
     }
 
-    // 4. Create backup of `~\AppData\Local\Native Instruments\Kontakt 8\komplete.db3` to force DB rebuild (if enabled)
-    char* db3 = join_paths(appdata_local, _DB3_ROOT);
+    return TRUE;
+}
+
+BOOL remove_cache_files(void) {
+    char* cache_path = join_paths(get_local_appdata_path(), _LIB_CACHE_ROOT);
+    return remove_all_files_in_dir(cache_path, BACKUP_FILES);
+}
+
+BOOL remove_db3(void) {
+    char* appdata_local = get_local_appdata_path();
+    char* db3           = join_paths(appdata_local, _DB3_ROOT);
     if (file_exists(db3)) {
         if (BACKUP_FILES) {
             char* db3_bak = join_str(db3, ".bak");
@@ -622,6 +640,39 @@ BOOL remove_library(const char* name) {
             _INFO("Deleted komplete.db3");
         }
     }
+
+    return TRUE;
+}
+
+BOOL remove_ras3_jwt(void) {
+    return remove_all_files_in_dir(_RAS3_ROOT, BACKUP_FILES);
+}
+
+BOOL remove_library(const char* name) {
+    if (!list_contains(LIBRARIES, name)) {
+        _ERROR("No library named '%s' found", name);
+        return FALSE;
+    }
+
+    BOOL result = remove_registry_keys(name);
+    if (!result)
+        return FALSE;
+
+    result = remove_xml_file(name);
+    if (!result)
+        return FALSE;
+
+    result = remove_cache_files();
+    if (!result)
+        return FALSE;
+
+    result = remove_db3();
+    if (!result)
+        return FALSE;
+
+    result = remove_ras3_jwt();
+    if (!result)
+        return FALSE;
 
     _INFO("Finished removing library: '%s'", name);
 
@@ -1355,7 +1406,7 @@ int WINAPI WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_cmd
     icc.dwICC  = ICC_WIN95_CLASSES | ICC_STANDARD_CLASSES;
     InitCommonControlsEx(&icc);
 
-    arena_init(_KB(32));
+    arena_init(_PROGRAM_MEMORY);
     enable_backup_privilege();
 
     WNDCLASS wc      = {0};

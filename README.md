@@ -13,12 +13,23 @@ Locations that need to be searched and deleted:
 - `C:\Program Files\Common Files\Native Instruments\Service Center\<Library Name>.xml`
 - `~\AppData\Local\Native Instruments\Kontakt 8\LibrariesCache\<filename>`
 - `~\AppData\Local\Native Instruments\Kontakt 8\komplete.db3`
+- `C:\Users\Public\Documents\Native Instruments\Native Access\ras3\<filename>.jwt`
+- `C:\Program Files\Common Files\Native Instruments\Kontakt 8\PAResources` [?]
 
 ## Install
 
 The latest version of K8-LRT is v1.0.0 - you can [download it here](https://github.com/jakerieger/K8-LRT/releases/latest).
 
 ## Changelog
+
+### 1.1.0 (TBD)
+
+#### Added
+- Removes additional files associated with the library cache (thanks to Bobdule for the info)
+
+#### ~~Changed~~
+
+#### ~~Fixed~~
 
 ### 1.0.0 (January 25, 2026)
 
