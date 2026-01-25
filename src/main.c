@@ -1,5 +1,5 @@
 /*
-    K8-LRT - v0.3.1 - Library removal tool for Bobdule's Kontakt 8
+    K8-LRT - v0.4.0 - Library removal tool for Bobdule's Kontakt 8
 
     LICENSE
 
@@ -32,10 +32,14 @@
 
     REVISION HISTORY
 
+        0.4.0  (2026-01-24) UI redux, added functionality
+        0.3.1  (2026-01-23) memory model improvements
         0.3.0  (2026-01-23) sweeping code changes, bug fixes, and logging
         0.2.0  (2026-01-23) tons of bug fixes and code improvements
         0.1.0  (2026-01-22) initial release of K8-LRT
 */
+
+#include "version.h"
 
 #include <stdio.h>
 #include <stdarg.h>
@@ -224,11 +228,16 @@ static HWND H_BACKUP_CHECKBOX;  // Whether or not we should backup delete files
 //                          -- GLOBALS --                             //
 //====================================================================//
 
+#define _WINDOW_W 300
+#define _WINDOW_H 390
+#define _WINDOW_CLASS "K8LRT_WindowClass\0"
+#define _WINDOW_TITLE "K8-LRT - v" VER_PRODUCTVERSION_STR
+
 #define _STREQ(s1, s2) strcmp(s1, s2) == 0
 #define _IS_CHECKED(checkbox) (SendMessage(checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED)
 #define _MAX_LIB_COUNT 512
-#define _LIB_CACHE_ROOT "Native Instruments\\Kontakt 8\\LibrariesCache"
-#define _DB3_ROOT "Native Instruments\\Kontakt 8\\komplete.db3"
+#define _LIB_CACHE_ROOT "Native Instruments\\Kontakt 8\\LibrariesCache\0"
+#define _DB3_ROOT "Native Instruments\\Kontakt 8\\komplete.db3\0"
 
 static char** LIBRARIES   = {NULL};
 static int LIB_COUNT      = 0;
@@ -282,9 +291,23 @@ static char* EXCLUSION_LIST[] = {
   NULL,
 };
 
+// TODO: Update these as more are found
+static char* EXCLUSION_PATTERNS[] = {
+  "Universal Audio*",
+  "u-he*",
+  "Waves*",
+  NULL,
+};
+
 //====================================================================//
 //                      -- HELPER FUNCTIONS --                        //
 //====================================================================//
+
+#define _NOT_IMPLEMENTED()                                                                                             \
+    do {                                                                                                               \
+        fprintf(stderr, "NOT IMPLEMENTED");                                                                            \
+        quick_exit(1);                                                                                                 \
+    } while (FALSE)
 
 char* get_local_appdata_path() {
     PWSTR psz_path = NULL;
@@ -354,6 +377,16 @@ BOOL list_contains(char* haystack[], const char* needle) {
         if (_STREQ(*p, needle))
             return TRUE;
     }
+    return FALSE;
+}
+
+BOOL matches_pattern_in_list(char* patterns[], const char* needle) {
+    for (char** p = patterns; *p != NULL; p++) {
+        if (PathMatchSpec(needle, *p)) {
+            return TRUE;
+        }
+    }
+
     return FALSE;
 }
 
@@ -436,7 +469,7 @@ BOOL query_libraries() {
     for (DWORD i = 0; i < found; i++) {
         char* key = found_keys[i];
 
-        if (!list_contains(EXCLUSION_LIST, key)) {
+        if (!list_contains(EXCLUSION_LIST, key) && !matches_pattern_in_list(EXCLUSION_PATTERNS, key)) {
             LIBRARIES[LIB_COUNT] = _strdup(key);
             SendMessage(H_LISTBOX, LB_INSERTSTRING, LIB_COUNT, (LPARAM)LIBRARIES[LIB_COUNT]);
             LIB_COUNT++;
@@ -594,24 +627,12 @@ BOOL remove_selected_library() {
 //====================================================================//
 
 LRESULT on_create(HWND hwnd) {
-    HWND h_label = CreateWindow("STATIC",
-                                "Select a library to remove below:",
-                                WS_CHILD | WS_VISIBLE | SS_LEFT,
-                                10,
-                                5,
-                                265,
-                                20,
-                                hwnd,
-                                NULL,
-                                GetModuleHandle(NULL),
-                                NULL);
-
     H_LISTBOX = CreateWindowEx(WS_EX_CLIENTEDGE,
                                "LISTBOX",
                                NULL,
                                WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY,
                                10,
-                               26,
+                               56,
                                265,
                                240,
                                hwnd,
@@ -624,7 +645,7 @@ LRESULT on_create(HWND hwnd) {
                                        "Backup files before deleting",
                                        WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX,
                                        10,
-                                       250,
+                                       280,
                                        220,
                                        20,
                                        hwnd,
@@ -637,7 +658,7 @@ LRESULT on_create(HWND hwnd) {
                                          "Remove All",
                                          WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                                          10,
-                                         280,
+                                         310,
                                          130,
                                          30,
                                          hwnd,
@@ -650,7 +671,7 @@ LRESULT on_create(HWND hwnd) {
                                      "Remove Selected",
                                      WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_DISABLED,
                                      147,
-                                     280,
+                                     310,
                                      130,
                                      30,
                                      hwnd,
@@ -673,7 +694,6 @@ LRESULT on_create(HWND hwnd) {
                               DEFAULT_PITCH | FF_DONTCARE,
                               "Segoe UI");
 
-    SendMessage(h_label, WM_SETFONT, (WPARAM)h_font, TRUE);
     SendMessage(H_LISTBOX, WM_SETFONT, (WPARAM)h_font, TRUE);
     SendMessage(H_REMOVE_ALL_BUTTON, WM_SETFONT, (WPARAM)h_font, TRUE);
     SendMessage(H_REMOVE_BUTTON, WM_SETFONT, (WPARAM)h_font, TRUE);
@@ -691,6 +711,22 @@ LRESULT on_create(HWND hwnd) {
                    MB_OK | MB_ICONERROR);
         PostQuitMessage(0);
     }
+
+    char label_text[256] = {'\0'};
+    snprintf(label_text, 256, "Select a library to remove (found %d):", LIB_COUNT);
+
+    HWND h_label = CreateWindow("STATIC",
+                                label_text,
+                                WS_CHILD | WS_VISIBLE | SS_LEFT,
+                                10,
+                                35,
+                                265,
+                                20,
+                                hwnd,
+                                NULL,
+                                GetModuleHandle(NULL),
+                                NULL);
+    SendMessage(h_label, WM_SETFONT, (WPARAM)h_font, TRUE);
 
     return 0;
 }
@@ -848,25 +884,23 @@ int WINAPI WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_cmd
     arena_init(_KB(32));
     enable_backup_privilege();
 
-    const char CLASS_NAME[] = "K8RemovalWindowClass";
-
     WNDCLASS wc      = {0};
     wc.lpfnWndProc   = wnd_proc;
     wc.hInstance     = h_instance;
-    wc.lpszClassName = CLASS_NAME;
+    wc.lpszClassName = _WINDOW_CLASS;
     wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
     wc.hIcon         = LoadIcon(h_instance, MAKEINTRESOURCE(IDI_APPICON));
 
     RegisterClass(&wc);
 
     HWND hwnd = CreateWindowEx(0,
-                               CLASS_NAME,
-                               "K8-LRT",
+                               _WINDOW_CLASS,
+                               _WINDOW_TITLE,
                                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
                                CW_USEDEFAULT,
                                CW_USEDEFAULT,
-                               300,
-                               360,
+                               _WINDOW_W,
+                               _WINDOW_H,
                                NULL,
                                NULL,
                                h_instance,

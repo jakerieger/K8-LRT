@@ -1,6 +1,6 @@
 # Kontakt 8 Library Removal Tool (K8-LRT)
 
-K8-LRT is a tool for removing libraries from the Bobdule version of Kontakt 8. Currently **Windows only**.
+K8-LRT is a tool for removing libraries from the Bobdule version of Kontakt 8 (**Windows only**).
 
 ![](docs/screenshot.png)
 
