@@ -26,6 +26,59 @@ BEGIN
     CONTROL         "<a>https://github.com/jakerieger/K8-LRT</a>", IDC_REPO_LINK, "SysLink", WS_TABSTOP, 35, 88, 130, 10
 END
 
+IDD_REMOVE_LIBRARYBOX DIALOGEX 0, 0, 320, 200
+STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Confirm Library Removal"
+FONT 8, "MS Shell Dlg", 400, 0, 0x1
+BEGIN
+    ICON            IDI_APPICON, IDC_STATIC, 14, 20, 20, 20
+    LTEXT           "You are about to remove the following library:", IDC_STATIC, 44, 14, 260, 8
+    LTEXT           "", IDC_REMOVE_LIBRARY_NAME, 44, 28, 260, 12, SS_NOPREFIX
+    LTEXT           "", IDC_REMOVE_LIBRARY_CONTENT_DIR, 44, 38, 260, 12, SS_NOPREFIX
+    
+    GROUPBOX        "This operation will:", IDC_STATIC, 14, 60, 292, 70
+    LTEXT           "- Delete registry entries\n- Remove XML configuration files\n- Clear library cache files\n- Reset the Kontakt database\n- Remove Native Access JWT tokens", 
+                    IDC_REMOVE_INFO_TEXT, 24, 74, 272, 50
+    
+    CONTROL         "Backup cache files before deleting", IDC_REMOVE_BACKUP_CHECK, "Button", 
+                    BS_AUTOCHECKBOX | WS_TABSTOP, 14, 138, 130, 10
+    CONTROL         "Delete library content directory", IDC_REMOVE_FOLDER_CHECK, "Button", 
+                    BS_AUTOCHECKBOX | WS_TABSTOP, 160, 138, 136, 10
+    
+    LTEXT           "Warning: This operation cannot be easily undone.", IDC_STATIC, 14, 156, 292, 8, SS_LEFT
+    
+    DEFPUSHBUTTON   "Remove Library", IDREMOVE, 146, 179, 80, 14
+    PUSHBUTTON      "Cancel", IDCANCEL_REMOVE, 230, 179, 76, 14
+END
+
+IDD_BATCH_REMOVEBOX DIALOGEX 0, 0, 340, 394
+STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Batch Library Removal"
+FONT 8, "MS Shell Dlg", 340, 0, 0x1
+BEGIN
+    ICON            IDI_APPICON, IDC_STATIC, 14, 14, 20, 20
+    LTEXT           "Select libraries to remove:", IDC_STATIC, 44, 14, 280, 8
+    LTEXT           "0 libraries selected", IDC_BATCH_COUNT_LABEL, 44, 28, 280, 8
+    
+    CONTROL         "", IDC_BATCH_LIBRARY_LIST, "SysListView32",
+                    LVS_REPORT | LVS_SINGLESEL | WS_BORDER | WS_TABSTOP,
+                    14, 46, 312, 220
+    
+    PUSHBUTTON      "Select All", IDC_BATCH_SELECT_ALL, 14, 272, 70, 14
+    PUSHBUTTON      "Deselect All", IDC_BATCH_DESELECT_ALL, 90, 272, 70, 14
+    
+    GROUPBOX        "Options", IDC_STATIC, 14, 294, 312, 48
+    CONTROL         "Backup cache files before deleting", IDC_BATCH_BACKUP_CHECK, "Button", 
+                    BS_AUTOCHECKBOX | WS_TABSTOP, 24, 308, 140, 10
+    CONTROL         "Delete library content directories", IDC_BATCH_FOLDER_CHECK, "Button", 
+                    BS_AUTOCHECKBOX | WS_TABSTOP, 24, 324, 146, 10
+    
+    LTEXT           "Warning: This operation cannot be easily undone.", IDC_STATIC, 14, 350, 372, 8
+    
+    DEFPUSHBUTTON   "Remove Selected", IDREMOVE_BATCH, 160, 371, 80, 14
+    PUSHBUTTON      "Cancel", IDCANCEL_BATCH, 246, 371, 80, 14
+END
+
 //=============================================================================//
 //                         --- VERSION METADATA ---                            //
 //=============================================================================//

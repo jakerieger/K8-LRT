@@ -16,20 +16,26 @@ Locations that need to be searched and deleted:
 - `C:\Users\Public\Documents\Native Instruments\Native Access\ras3\<filename>.jwt`
 - `C:\Program Files\Common Files\Native Instruments\Kontakt 8\PAResources` [?]
 
-## Install
+## Quickstart
 
 The latest version of K8-LRT is v1.0.0 - you can [download it here](https://github.com/jakerieger/K8-LRT/releases/latest).
 
+Check out the [Quickstart](docs/QUICKSTART.md) guide for info on how to use K8-LRT.
+
 ## Changelog
 
-### 1.1.0 (TBD)
+### 1.1.0 (January 26, 2026)
 
 #### Added
 - Removes additional files associated with the library cache (thanks to Bobdule for the info)
+- Removal dialogs for confirming options prior to removing one or multiple libraries
 
-#### ~~Changed~~
+#### Changed
+- Condensed "File" and "Help" menus into a single menu
+- Label text changes
 
-#### ~~Fixed~~
+#### Fixed
+- Bug with checkbox values not persisting
 
 ### 1.0.0 (January 25, 2026)
 
@@ -74,7 +80,7 @@ The official 1.0 release of K8-LRT.
 
 ## Building
 
-K8-LRT is written in pure C using the Windows API. The entire program is just over 1400 lines of code and the executable is only about 300 Kb. 
+K8-LRT is written in pure C using the Windows API. The entire program is just under 2000 lines of code and the executable is only about 300 Kb. 
 
 K8-LRT can be compiled via `nmake`, which is included with the MSVC toolchain. This requires the C++ Visual Studio toolsuite to be installed. If it is, you can simply run the build script from PowerShell to build K8-LRT:
 

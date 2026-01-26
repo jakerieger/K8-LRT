@@ -32,7 +32,7 @@
 
     REVISION HISTORY
 
-        1.1.0  (   TBD    )  additional directory checks and removals
+        1.1.0  (2026-01-26)  additional directory checks and removals, UI additions and changes
         1.0.0  (2026-01-25)  UI redux, added functionality, updates
         0.3.1  (2026-01-23)  memory model improvements
         0.3.0  (2026-01-23)  sweeping code changes, bug fixes, and logging
@@ -216,18 +216,19 @@ void arena_clear(void) {
 
 #include "resource.h"
 
-static HWND H_LISTBOX           = NULL;
-static HWND H_REMOVE_BUTTON     = NULL;
-static HWND H_REMOVE_ALL_BUTTON = NULL;
-static HWND H_BACKUP_CHECKBOX   = NULL;  // Whether or not we should backup delete filesa
-static HWND H_LOG_VIEWER        = NULL;
+static HWND H_LISTBOX                    = NULL;
+static HWND H_REMOVE_BUTTON              = NULL;
+static HWND H_REMOVE_ALL_BUTTON          = NULL;
+static HWND H_BACKUP_CHECKBOX            = NULL;  // Whether or not we should backup delete filesa
+static HWND H_LOG_VIEWER                 = NULL;
+static HWND H_REMOVE_LIB_FOLDER_CHECKBOX = NULL;
 
 //====================================================================//
 //                          -- GLOBALS --                             //
 //====================================================================//
 
 #define _WINDOW_W 300
-#define _WINDOW_H 390
+#define _WINDOW_H 406
 #define _WINDOW_CLASS "K8LRT_WindowClass\0"
 #define _WINDOW_TITLE "K8-LRT - v" VER_PRODUCTVERSION_STR
 
@@ -237,21 +238,49 @@ static HWND H_LOG_VIEWER        = NULL;
 #define _LOGVIEW_TITLE "Log\0"
 
 #define _STREQ(s1, s2) strcmp(s1, s2) == 0
-#define _IS_CHECKED(checkbox) (SendMessage(checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED)
+#define _IS_CHECKED(checkbox) (IsDlgButtonChecked(hwnd, checkbox) == BST_CHECKED)
 #define _MAX_LIB_COUNT 512
 
 #define _LIB_CACHE_ROOT "Native Instruments\\Kontakt 8\\LibrariesCache\0"
 #define _DB3_ROOT "Native Instruments\\Kontakt 8\\komplete.db3\0"
 #define _RAS3_ROOT "C:\\Users\\Public\\Documents\\Native Instruments\\Native Access\\ras3\0"
 
-static char** LIBRARIES    = {NULL};
-static int LIB_COUNT       = 0;
-static int SELECTED_INDEX  = -1;
-static BOOL BACKUP_FILES   = TRUE;
-static BOOL INITIAL_SEARCH = TRUE;
+typedef struct library_entry library_entry;
+
+typedef struct {
+    library_entry* library;
+    BOOL backup_files;
+    BOOL remove_content_dir;
+} remove_lib_dialog_data;
+
+typedef struct {
+    library_entry* libraries;
+    int lib_count;
+    BOOL* selected;
+    BOOL backup_files;
+    BOOL remove_library_folder;
+    int selected_count;
+} batch_removal_dialog_data;
+
+struct library_entry {
+    // Library name in registry (this is always the general name used throughout NI's systems)
+    const char* name;
+    // Actual location of library on disk
+    const char* content_dir;
+};
+
+static library_entry* LIBRARIES = {NULL};
+static int LIB_COUNT            = 0;
+static int SELECTED_INDEX       = -1;
+
+// Whether this is the first time querying for libraries
+static BOOL INITIAL_SEARCH     = TRUE;
+static BOOL BACKUP_FILES       = TRUE;
+static BOOL REMOVE_CONTENT_DIR = TRUE;
 
 // Exclusion list - NI products that aren't libraries
-static char* EXCLUSION_LIST[] = {
+#define KEY_EXCLUSION_LIST_SIZE 42
+static char* KEY_EXCLUSION_LIST[KEY_EXCLUSION_LIST_SIZE] = {
   "Massive",
   "Massive X",
   "Reaktor 6",
@@ -294,26 +323,39 @@ static char* EXCLUSION_LIST[] = {
   "Passive EQ",
   "RC 24",
   "RC 48",
-  NULL,
 };
 
 // TODO: Update these as more are found
-static char* EXCLUSION_PATTERNS[] = {
+#define KEY_EXCLUSION_PATTERNS_SIZE 3
+static char* KEY_EXCLUSION_PATTERNS[KEY_EXCLUSION_PATTERNS_SIZE] = {
   "Universal Audio*",
   "u-he*",
   "Waves*",
-  NULL,
 };
 
 //====================================================================//
 //                      -- HELPER FUNCTIONS --                        //
 //====================================================================//
+#ifndef NDEBUG
+    #define _ASSERT(condition)                                                                                         \
+        if (!(condition)) {                                                                                            \
+            _ERROR("Debug assertion failed: %s:%d", __FILE__, __LINE__);                                               \
+            __debugbreak();                                                                                            \
+        }
 
-#define _NOT_IMPLEMENTED()                                                                                             \
-    do {                                                                                                               \
-        fprintf(stderr, "NOT IMPLEMENTED");                                                                            \
-        quick_exit(1);                                                                                                 \
-    } while (FALSE)
+    #define _NOT_IMPLEMENTED()                                                                                         \
+        do {                                                                                                           \
+            fprintf(stderr, "NOT IMPLEMENTED");                                                                        \
+            quick_exit(1);                                                                                             \
+        } while (FALSE)
+#else
+    #define _ASSERT(condition)                                                                                         \
+        if (!(condition)) {                                                                                            \
+            _ERROR("Debug assertion failed: %s:%d", __FILE__, __LINE__);                                               \
+        }
+
+    #define _NOT_IMPLEMENTED()
+#endif
 
 char* get_local_appdata_path(void) {
     PWSTR psz_path = NULL;
@@ -378,6 +420,11 @@ BOOL file_exists(const char* path) {
     return (dw_attrib != INVALID_FILE_ATTRIBUTES && !(dw_attrib & FILE_ATTRIBUTE_DIRECTORY));
 }
 
+BOOL directory_exists(const char* path) {
+    DWORD dw_attrib = GetFileAttributesA(path);
+    return (dw_attrib != INVALID_FILE_ATTRIBUTES && (dw_attrib & FILE_ATTRIBUTE_DIRECTORY));
+}
+
 BOOL has_extension(const char* filename, const char* ext) {
     const char* extension = strrchr(filename, '.');
     if (!extension)
@@ -387,19 +434,48 @@ BOOL has_extension(const char* filename, const char* ext) {
     return FALSE;
 }
 
-BOOL list_contains(char* haystack[], const char* needle) {
-    for (char** p = haystack; *p != NULL; p++) {
-        if (_STREQ(*p, needle))
+BOOL rm_rf(const char* directory) {
+    if (directory == NULL)
+        return FALSE;
+
+    SHFILEOPSTRUCTA file_op = {
+      .hwnd                  = NULL,
+      .wFunc                 = FO_DELETE,
+      .pFrom                 = directory,
+      .pTo                   = NULL,
+      .fFlags                = FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT,
+      .fAnyOperationsAborted = FALSE,
+      .hNameMappings         = NULL,
+      .lpszProgressTitle     = NULL,
+    };
+
+    // SHFileOperation expects a double-null terminated string
+    char path_buffer[MAX_PATH + 1] = {0};
+    strncpy_s(path_buffer, strlen(directory), directory, MAX_PATH);
+
+    file_op.pFrom = path_buffer;
+    return SHFileOperationA(&file_op) == 0;
+}
+
+BOOL list_contains(char* haystack[], const int haystack_size, const char* needle) {
+    _ASSERT(haystack_size > 0);
+
+    for (int i = 0; i < haystack_size; i++) {
+        const char* str = haystack[i];
+        if (_STREQ(str, needle))
             return TRUE;
     }
+
     return FALSE;
 }
 
-BOOL matches_pattern_in_list(char* patterns[], const char* needle) {
-    for (char** p = patterns; *p != NULL; p++) {
-        if (PathMatchSpec(needle, *p)) {
+BOOL matches_pattern_in_list(char* patterns[], const int patterns_count, const char* needle) {
+    _ASSERT(patterns_count > 0);
+
+    for (int i = 0; i < patterns_count; i++) {
+        const char* str = patterns[i];
+        if (PathMatchSpec(needle, str))
             return TRUE;
-        }
     }
 
     return FALSE;
@@ -430,14 +506,8 @@ void clear_libraries(void) {
         arena_clear();
     }
 
-    LIBRARIES = _ALLOC_ARRAY(char*, _MAX_LIB_COUNT);
-
-    for (int i = 0; i < _MAX_LIB_COUNT; i++) {
-        if (LIBRARIES[i] != NULL) {
-            free(LIBRARIES[i]);
-            LIBRARIES[i] = NULL;
-        }
-    }
+    // Reset libraries array
+    LIBRARIES = _ALLOC_ARRAY(library_entry, _MAX_LIB_COUNT);
 
     // Reset list box contents
     SendMessage(H_LISTBOX, LB_RESETCONTENT, 0, 0);
@@ -450,11 +520,11 @@ BOOL query_libraries(HWND hwnd) {
     clear_libraries();
 
     HKEY h_key;
-    LPCSTR subkey = "SOFTWARE\\Native Instruments";
+    LPCSTR base_path = "SOFTWARE\\Native Instruments";
 
-    LONG result = RegOpenKeyExA(HKEY_LOCAL_MACHINE, subkey, 0, KEY_READ, &h_key);
+    LONG result = RegOpenKeyExA(HKEY_LOCAL_MACHINE, base_path, 0, KEY_READ, &h_key);
     if (result != ERROR_SUCCESS) {
-        _ERROR("Failed to open registry key: '%s'", subkey);
+        _ERROR("Failed to open registry key: '%s'", base_path);
         return FALSE;
     }
 
@@ -463,37 +533,81 @@ BOOL query_libraries(HWND hwnd) {
     FILETIME ft_last_write_time;
 
     DWORD found = 0;
-    char* found_keys[_MAX_LIB_COUNT];
-
     while (RegEnumKeyExA(h_key, found, ach_key, &cb_name, NULL, NULL, NULL, &ft_last_write_time) == ERROR_SUCCESS) {
-        if (found > _MAX_LIB_COUNT) {
+        if ((ARENA->position - _ARENA_BASE) + sizeof(library_entry) > ARENA->capacity) {
             RegCloseKey(h_key);
-            _ERROR("Number of libraries found exceeds current program limit of %d", _MAX_LIB_COUNT);
+            _ERROR("Memory capacity reached (%d > %d)",
+                   (ARENA->position - _ARENA_BASE) + sizeof(library_entry),
+                   ARENA->capacity);
             return FALSE;
         }
 
-        found_keys[found] = _strdup(ach_key);
-        cb_name           = sizeof(ach_key);
-        found++;
-    }
-    RegCloseKey(h_key);
-    found_keys[found] = NULL;
+        BOOL in_exclusion_list = list_contains(KEY_EXCLUSION_LIST, KEY_EXCLUSION_LIST_SIZE, ach_key);
+        BOOL matches_exclusion_pattern =
+          matches_pattern_in_list(KEY_EXCLUSION_PATTERNS, KEY_EXCLUSION_PATTERNS_SIZE, ach_key);
 
-    // Filter found keys
-    LIB_COUNT = 0;
-    for (DWORD i = 0; i < found; i++) {
-        char* key = found_keys[i];
+        if (!in_exclusion_list && !matches_exclusion_pattern) {
+            // Fetch ContentDir value
+            HKEY h_subkey;
+            if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, join_paths(base_path, ach_key), 0, KEY_READ, &h_subkey) ==
+                ERROR_SUCCESS) {
+                char content_path[MAX_PATH];
+                DWORD buffer_size = sizeof(content_path);
+                DWORD value_type;
 
-        if (!list_contains(EXCLUSION_LIST, key) && !matches_pattern_in_list(EXCLUSION_PATTERNS, key)) {
-            LIBRARIES[LIB_COUNT] = _strdup(key);
-            SendMessage(H_LISTBOX, LB_INSERTSTRING, LIB_COUNT, (LPARAM)LIBRARIES[LIB_COUNT]);
-            LIB_COUNT++;
+                LSTATUS status =
+                  RegQueryValueExA(h_subkey, "ContentDir", NULL, &value_type, (LPBYTE)content_path, &buffer_size);
+
+                if (status == ERROR_SUCCESS && value_type == REG_SZ) {
+                    const int key_len         = strlen(ach_key);
+                    const int content_dir_len = strlen(content_path);
+
+                    // Move key and content_dir strings to arena so the original memory can be freed
+                    char* key_memory         = _ALLOC_STR(key_len + 1);
+                    char* content_dir_memory = _ALLOC_STR(content_dir_len + 1);
+
+                    memcpy(key_memory, ach_key, key_len);
+                    key_memory[key_len] = '\0';
+                    memcpy(content_dir_memory, content_path, content_dir_len);
+                    content_dir_memory[content_dir_len] = '\0';
+
+                    // Get ContentDir and push to LIBRARIES array
+                    library_entry entry = {
+                      .name        = key_memory,
+                      .content_dir = content_dir_memory,
+                    };
+
+                    memcpy(&LIBRARIES[LIB_COUNT], &entry, sizeof(entry));
+                    SendMessage(H_LISTBOX, LB_INSERTSTRING, LIB_COUNT, (LPARAM)LIBRARIES[LIB_COUNT].name);
+                    LIB_COUNT++;
+                } else if (status == ERROR_MORE_DATA) {
+                    // TODO: Handle cases where the path length > MAX_PATH
+                    _ERROR("ContentDir value length is greater than MAX_PATH (%d) for registry key: "
+                           "'HKEY_LOCAL_MACHINE\\%s\\%s'",
+                           MAX_PATH,
+                           base_path,
+                           ach_key);
+                    RegCloseKey(h_subkey);
+                    RegCloseKey(h_key);
+                    return FALSE;
+                } else {
+                    _ERROR("Failed to retrieve ContentDir value for registry key: 'HKEY_LOCAL_MACHINE\\%s\\%s'",
+                           base_path,
+                           ach_key);
+                    RegCloseKey(h_subkey);
+                    RegCloseKey(h_key);
+                    return FALSE;
+                }
+
+                RegCloseKey(h_subkey);
+            }
         }
 
-        free(key);
-        found_keys[i] = NULL;
+        cb_name = sizeof(ach_key);
+        found++;
     }
-    LIBRARIES[LIB_COUNT] = NULL;
+
+    RegCloseKey(h_key);
 
     _INFO("Finished querying registry entries (found %d library entries)", LIB_COUNT);
 
@@ -522,7 +636,7 @@ BOOL remove_registry_keys(const char* key) {
                 LONG backup_res = RegSaveKeyExA(h_subkey, reg_filename, NULL, REG_LATEST_FORMAT);
 
                 if (backup_res != ERROR_SUCCESS) {
-                    _ERROR("Failed to backup registry entry for key: '%s\\%s'", base_path, key);
+                    _ERROR("Failed to backup registry entry for key: 'HKEY_LOCAL_MACHINE\\%s\\%s'", base_path, key);
                     RegCloseKey(h_subkey);
                     return FALSE;
                 }
@@ -533,13 +647,13 @@ BOOL remove_registry_keys(const char* key) {
 
         LONG res = RegDeleteKeyA(h_key, key);
         if (res != ERROR_SUCCESS) {
-            _ERROR("Failed to delete registry key: '%s\\%s'", base_path, key);
+            _ERROR("Failed to delete registry key: 'HKEY_LOCAL_MACHINE\\%s\\%s'", base_path, key);
             RegCloseKey(h_key);
             return FALSE;
         }
 
         RegCloseKey(h_key);
-        _INFO("Removed registry key: '%s\\%s'", base_path, key);
+        _INFO("Removed registry key: 'HKEY_LOCAL_MACHINE\\%s\\%s'", base_path, key);
     }
 
     return TRUE;
@@ -648,17 +762,23 @@ BOOL remove_ras3_jwt(void) {
     return remove_all_files_in_dir(_RAS3_ROOT, BACKUP_FILES);
 }
 
-BOOL remove_library(const char* name) {
-    if (!list_contains(LIBRARIES, name)) {
-        _ERROR("No library named '%s' found", name);
-        return FALSE;
+BOOL remove_library(const library_entry* library, BOOL remove_content) {
+    _ASSERT(library != NULL);
+    _ASSERT(library->name != NULL);
+    _ASSERT(library->content_dir != NULL);
+
+    for (int i = 0; i < LIB_COUNT; i++) {
+        const library_entry* entry = &LIBRARIES[i];
+        if (_STREQ(entry->name, library->name)) {
+            return FALSE;
+        }
     }
 
-    BOOL result = remove_registry_keys(name);
+    BOOL result = remove_registry_keys(library->name);
     if (!result)
         return FALSE;
 
-    result = remove_xml_file(name);
+    result = remove_xml_file(library->name);
     if (!result)
         return FALSE;
 
@@ -674,7 +794,13 @@ BOOL remove_library(const char* name) {
     if (!result)
         return FALSE;
 
-    _INFO("Finished removing library: '%s'", name);
+    if (remove_content && directory_exists(library->content_dir)) {
+        result = rm_rf(library->content_dir);
+        if (!result)
+            return FALSE;
+    }
+
+    _INFO("Finished removing library: '%s'", library->name);
 
     return TRUE;
 }
@@ -683,7 +809,7 @@ BOOL remove_selected_library(void) {
     if (SELECTED_INDEX == -1)
         return FALSE;
 
-    return remove_library(LIBRARIES[SELECTED_INDEX]);
+    return remove_library(&LIBRARIES[SELECTED_INDEX], REMOVE_CONTENT_DIR);
 }
 
 // Extract tag name from GitHub json response
@@ -848,6 +974,51 @@ cleanup:
     return latest_version;
 }
 
+void check_for_updates(HWND hwnd) {
+    char* current_version = get_latest_version();
+    int compare           = compare_versions(current_version, VER_PRODUCTVERSION_STR);
+
+    if (compare > 0) {
+        char message[512];
+        sprintf_s(message,
+                  512,
+                  "A new version of K8-LRT is available!\n\n"
+                  "Current: %s\n"
+                  "Latest: %s\n\n"
+                  "Visit the GitHub releases page to download?",
+                  VER_PRODUCTVERSION_STR,
+                  current_version + 1);
+
+        int result = MessageBoxA(hwnd, message, "Update Available", MB_YESNO | MB_ICONINFORMATION);
+
+        if (result == IDYES) {
+            ShellExecuteA(NULL,
+                          "open",
+                          "https://github.com/jakerieger/K8-LRT/releases/latest",
+                          NULL,
+                          NULL,
+                          SW_SHOWNORMAL);
+        }
+    } else if (compare < 0) {
+        MessageBox(hwnd,
+                   "You are running a development build. K8-LRT may not be stable.",
+                   "Update Check",
+                   MB_OK | MB_ICONWARNING);
+    } else {
+        MessageBox(hwnd, "You're running the latest version!", "Up to Date", MB_OK | MB_ICONINFORMATION);
+    }
+}
+
+void update_batch_count_label(HWND hwnd, int count) {
+    char label_text[64] = {'\0'};
+    if (count == 1) {
+        sprintf_s(label_text, sizeof(label_text), "1 library selected");
+    } else {
+        sprintf_s(label_text, sizeof(label_text), "%d libraries selected", count);
+    }
+    SetDlgItemTextA(hwnd, IDC_BATCH_COUNT_LABEL, label_text);
+}
+
 //====================================================================//
 //                      -- DIALOG CALLBACKS --                        //
 //====================================================================//
@@ -1001,25 +1172,247 @@ INT_PTR CALLBACK about_dialog_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM l
     return (INT_PTR)FALSE;
 }
 
+INT_PTR CALLBACK remove_library_dialog_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM lparam) {
+    static remove_lib_dialog_data* data = NULL;
+
+    switch (umsg) {
+        case WM_INITDIALOG: {
+            data = (remove_lib_dialog_data*)lparam;
+
+            HWND h_name_label = GetDlgItem(hwnd, IDC_REMOVE_LIBRARY_NAME);
+            SetWindowTextA(h_name_label, data->library->name);
+
+            HFONT h_font = CreateFont(16,
+                                      0,
+                                      0,
+                                      0,
+                                      FW_BOLD,
+                                      FALSE,
+                                      FALSE,
+                                      FALSE,
+                                      DEFAULT_CHARSET,
+                                      OUT_DEFAULT_PRECIS,
+                                      CLIP_DEFAULT_PRECIS,
+                                      DEFAULT_QUALITY,
+                                      DEFAULT_PITCH | FF_DONTCARE,
+                                      "Segoe UI");
+            SendMessage(h_name_label, WM_SETFONT, (WPARAM)h_font, TRUE);
+
+            HWND h_content_dir_label = GetDlgItem(hwnd, IDC_REMOVE_LIBRARY_CONTENT_DIR);
+            SetWindowTextA(h_content_dir_label, data->library->content_dir);
+
+            CheckDlgButton(hwnd, IDC_REMOVE_BACKUP_CHECK, data->backup_files ? BST_CHECKED : BST_UNCHECKED);
+            CheckDlgButton(hwnd, IDC_REMOVE_FOLDER_CHECK, data->remove_content_dir ? BST_CHECKED : BST_UNCHECKED);
+
+            RECT parent_rect, dlg_rect;
+            HWND h_parent = GetParent(hwnd);
+            GetWindowRect(h_parent, &parent_rect);
+            GetWindowRect(hwnd, &dlg_rect);
+
+            int dlg_w    = dlg_rect.right - dlg_rect.left;
+            int dlg_h    = dlg_rect.bottom - dlg_rect.top;
+            int parent_x = parent_rect.left;
+            int parent_y = parent_rect.top;
+            int parent_w = parent_rect.right - parent_rect.left;
+            int parent_h = parent_rect.bottom - parent_rect.top;
+
+            int x = parent_x + (parent_w - dlg_w) / 2;
+            int y = parent_y + (parent_h - dlg_h) / 2;
+
+            SetWindowPos(hwnd, NULL, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+
+            return (INT_PTR)TRUE;
+        }
+
+        case WM_COMMAND: {
+            switch (LOWORD(wparam)) {
+                case IDREMOVE: {
+                    data->backup_files       = (IsDlgButtonChecked(hwnd, IDC_REMOVE_BACKUP_CHECK) == BST_CHECKED);
+                    data->remove_content_dir = (IsDlgButtonChecked(hwnd, IDC_REMOVE_FOLDER_CHECK) == BST_CHECKED);
+                    EndDialog(hwnd, IDREMOVE);
+                    return (INT_PTR)TRUE;
+                }
+
+                case IDCANCEL_REMOVE:
+                case IDCANCEL: {
+                    EndDialog(hwnd, IDCANCEL);
+                    return (INT_PTR)TRUE;
+                }
+            }
+            break;
+        }
+
+        case WM_CLOSE: {
+            EndDialog(hwnd, IDCANCEL);
+            return (INT_PTR)TRUE;
+        }
+    }
+
+    return (INT_PTR)FALSE;
+}
+
+INT_PTR CALLBACK batch_remove_dialog_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM lparam) {
+    static batch_removal_dialog_data* data = NULL;
+
+    switch (umsg) {
+        case WM_INITDIALOG: {
+            data = (batch_removal_dialog_data*)lparam;
+
+            HWND h_list = GetDlgItem(hwnd, IDC_BATCH_LIBRARY_LIST);
+            ListView_SetExtendedListViewStyle(h_list, LVS_EX_CHECKBOXES | LVS_EX_FULLROWSELECT);
+
+            LVCOLUMN lvc = {0};
+            lvc.mask     = LVCF_TEXT | LVCF_WIDTH;
+            lvc.cx       = 340;
+            lvc.pszText  = "Library Name";
+            ListView_InsertColumn(h_list, 0, &lvc);
+
+            LVITEM lvi = {0};
+            lvi.mask   = LVIF_TEXT;
+
+            for (int i = 0; i < data->lib_count; i++) {
+                lvi.iItem   = i;
+                lvi.pszText = (char*)data->libraries[i].name;
+                ListView_InsertItem(h_list, &lvi);
+
+                ListView_SetCheckState(h_list, i, data->selected[i]);
+            }
+
+            CheckDlgButton(hwnd, IDC_BATCH_BACKUP_CHECK, data->backup_files ? BST_CHECKED : BST_UNCHECKED);
+            CheckDlgButton(hwnd, IDC_BATCH_FOLDER_CHECK, data->remove_library_folder ? BST_CHECKED : BST_UNCHECKED);
+
+            update_batch_count_label(hwnd, data->selected_count);
+
+            RECT parent_rect, dlg_rect;
+            HWND h_parent = GetParent(hwnd);
+            GetWindowRect(h_parent, &parent_rect);
+            GetWindowRect(hwnd, &dlg_rect);
+
+            int dlg_w    = dlg_rect.right - dlg_rect.left;
+            int dlg_h    = dlg_rect.bottom - dlg_rect.top;
+            int parent_x = parent_rect.left;
+            int parent_y = parent_rect.top;
+            int parent_w = parent_rect.right - parent_rect.left;
+            int parent_h = parent_rect.bottom - parent_rect.top;
+
+            int x = parent_x + (parent_w - dlg_w) / 2;
+            int y = parent_y + (parent_h - dlg_h) / 2;
+
+            SetWindowPos(hwnd, NULL, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+
+            return (INT_PTR)TRUE;
+        }
+
+        case WM_NOTIFY: {
+            LPNMHDR pnmh = (LPNMHDR)lparam;
+
+            if (pnmh->idFrom == IDC_BATCH_LIBRARY_LIST) {
+                HWND h_list = GetDlgItem(hwnd, IDC_BATCH_LIBRARY_LIST);
+
+                if (pnmh->code == LVN_ITEMCHANGED) {
+                    LPNMLISTVIEW pnmlv = (LPNMLISTVIEW)lparam;
+
+                    if ((pnmlv->uChanged & LVIF_STATE) &&
+                        ((pnmlv->uNewState & LVIS_STATEIMAGEMASK) != (pnmlv->uOldState & LVIS_STATEIMAGEMASK))) {
+                        data->selected[pnmlv->iItem] = ListView_GetCheckState(h_list, pnmlv->iItem);
+
+                        int count = 0;
+                        for (int i = 0; i < data->lib_count; i++) {
+                            if (data->selected[i]) {
+                                count++;
+                            }
+                        }
+                        data->selected_count = count;
+
+                        update_batch_count_label(hwnd, count);
+                        EnableWindow(GetDlgItem(hwnd, IDREMOVE_BATCH), count > 0);
+                    }
+                }
+            }
+            break;
+        }
+
+        case WM_COMMAND: {
+            HWND h_list = GetDlgItem(hwnd, IDC_BATCH_LIBRARY_LIST);
+
+            switch (LOWORD(wparam)) {
+                case IDC_BATCH_SELECT_ALL: {
+                    for (int i = 0; i < data->lib_count; i++) {
+                        ListView_SetCheckState(h_list, i, TRUE);
+                        data->selected[i] = TRUE;
+                    }
+                    data->selected_count = data->lib_count;
+                    update_batch_count_label(hwnd, data->selected_count);
+                    EnableWindow(GetDlgItem(hwnd, IDREMOVE_BATCH), TRUE);
+                    return (INT_PTR)TRUE;
+                }
+
+                case IDC_BATCH_DESELECT_ALL: {
+                    for (int i = 0; i < data->lib_count; i++) {
+                        ListView_SetCheckState(h_list, i, FALSE);
+                        data->selected[i] = FALSE;
+                    }
+                    data->selected_count = 0;
+                    update_batch_count_label(hwnd, 0);
+                    EnableWindow(GetDlgItem(hwnd, IDREMOVE_BATCH), FALSE);
+                    return (INT_PTR)TRUE;
+                }
+
+                case IDREMOVE_BATCH: {
+                    if (data->selected_count == 0) {
+                        MessageBox(hwnd,
+                                   "Please select at least one library to remove.",
+                                   "No Selection",
+                                   MB_OK | MB_ICONINFORMATION);
+                        return (INT_PTR)TRUE;
+                    }
+
+                    data->backup_files          = (IsDlgButtonChecked(hwnd, IDC_BATCH_BACKUP_CHECK) == BST_CHECKED);
+                    data->remove_library_folder = (IsDlgButtonChecked(hwnd, IDC_BATCH_FOLDER_CHECK) == BST_CHECKED);
+
+                    for (int i = 0; i < data->lib_count; i++) {
+                        data->selected[i] = ListView_GetCheckState(h_list, i);
+                    }
+
+                    EndDialog(hwnd, IDREMOVE_BATCH);
+                    return (INT_PTR)TRUE;
+                }
+
+                case IDCANCEL_BATCH:
+                case IDCANCEL: {
+                    EndDialog(hwnd, IDCANCEL);
+                    return (INT_PTR)TRUE;
+                }
+            }
+            break;
+        }
+
+        case WM_CLOSE: {
+            EndDialog(hwnd, IDCANCEL);
+            return (INT_PTR)TRUE;
+        }
+    }
+
+    return (INT_PTR)FALSE;
+}
+
 //====================================================================//
-//                      -- INPUT CALLBACKS --                         //
+//                     -- WNDPROC CALLBACKS --                        //
 //====================================================================//
 
 LRESULT on_create(HWND hwnd) {
-    HMENU h_menubar   = CreateMenu();
-    HMENU h_file_menu = CreateMenu();
-    HMENU h_help_menu = CreateMenu();
+    HMENU h_menubar = CreateMenu();
+    HMENU h_menu    = CreateMenu();
 
-    AppendMenu(h_file_menu, MF_STRING, ID_FILE_VIEW_LOG, "&View Log");
-    AppendMenu(h_file_menu, MF_STRING, ID_FILE_RELOAD_LIBRARIES, "&Reload Libraries");
-    AppendMenu(h_file_menu, MF_SEPARATOR, 0, NULL);
-    AppendMenu(h_file_menu, MF_STRING, ID_FILE_EXIT, "E&xit");
+    AppendMenu(h_menu, MF_STRING, ID_FILE_VIEW_LOG, "&View Log");
+    AppendMenu(h_menu, MF_STRING, ID_FILE_RELOAD_LIBRARIES, "&Reload Libraries");
+    AppendMenu(h_menu, MF_SEPARATOR, 0, NULL);
+    AppendMenu(h_menu, MF_STRING, ID_HELP_CHECK_UPDATES, "&Check for Updates");
+    AppendMenu(h_menu, MF_STRING, ID_HELP_ABOUT, "&About");
+    AppendMenu(h_menu, MF_SEPARATOR, 0, NULL);
+    AppendMenu(h_menu, MF_STRING, ID_FILE_EXIT, "E&xit");
 
-    AppendMenu(h_help_menu, MF_STRING, ID_HELP_CHECK_UPDATES, "&Check for Updates");
-    AppendMenu(h_help_menu, MF_STRING, ID_HELP_ABOUT, "&About");
-
-    AppendMenu(h_menubar, MF_POPUP, (UINT_PTR)h_file_menu, "&File");
-    AppendMenu(h_menubar, MF_POPUP, (UINT_PTR)h_help_menu, "&Help");
+    AppendMenu(h_menubar, MF_POPUP, (UINT_PTR)h_menu, "&Menu");
 
     SetMenu(hwnd, h_menubar);
 
@@ -1038,7 +1431,7 @@ LRESULT on_create(HWND hwnd) {
 
     H_BACKUP_CHECKBOX = CreateWindowEx(0,
                                        "BUTTON",
-                                       "Backup files before deleting",
+                                       "Backup cache files before deleting",
                                        WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX,
                                        10,
                                        260,
@@ -1049,12 +1442,25 @@ LRESULT on_create(HWND hwnd) {
                                        GetModuleHandle(NULL),
                                        NULL);
 
+    H_REMOVE_LIB_FOLDER_CHECKBOX = CreateWindowEx(0,
+                                                  "BUTTON",
+                                                  "Delete library folder",
+                                                  WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX,
+                                                  10,
+                                                  280,
+                                                  220,
+                                                  20,
+                                                  hwnd,
+                                                  (HMENU)IDC_CHECKBOX_BACKUP,
+                                                  GetModuleHandle(NULL),
+                                                  NULL);
+
     H_REMOVE_ALL_BUTTON = CreateWindowEx(0,
                                          "BUTTON",
-                                         "Remove All",
+                                         "Remove All...",
                                          WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                                          10,
-                                         290,
+                                         306,
                                          130,
                                          30,
                                          hwnd,
@@ -1067,7 +1473,7 @@ LRESULT on_create(HWND hwnd) {
                                      "Remove Selected",
                                      WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_DISABLED,
                                      147,
-                                     290,
+                                     306,
                                      130,
                                      30,
                                      hwnd,
@@ -1096,6 +1502,9 @@ LRESULT on_create(HWND hwnd) {
 
     SendMessage(H_BACKUP_CHECKBOX, WM_SETFONT, (WPARAM)h_font, TRUE);
     SendMessage(H_BACKUP_CHECKBOX, BM_SETCHECK, (WPARAM)TRUE, TRUE);
+
+    SendMessage(H_REMOVE_LIB_FOLDER_CHECKBOX, WM_SETFONT, (WPARAM)h_font, TRUE);
+    SendMessage(H_REMOVE_LIB_FOLDER_CHECKBOX, BM_SETCHECK, (WPARAM)TRUE, TRUE);
 
     // Search registry for key entries in `HKEY_LOCAL_MACHINE/SOFTWARE/Native Instruments/..`
     BOOL query_result = query_libraries(hwnd);
@@ -1127,6 +1536,11 @@ LRESULT on_create(HWND hwnd) {
     return 0;
 }
 
+LRESULT on_show(HWND hwnd) {
+    check_for_updates(hwnd);
+    return 0;
+}
+
 void on_selection_changed(HWND hwnd) {
     int sel = (int)SendMessage(H_LISTBOX, LB_GETCURSEL, 0, 0);
     if (sel != LB_ERR) {
@@ -1136,17 +1550,28 @@ void on_selection_changed(HWND hwnd) {
 }
 
 void on_remove_selected(HWND hwnd) {
-    char msg[512];
-    sprintf_s(msg, sizeof(msg), "Are you sure you want to permanently remove '%s'?", LIBRARIES[SELECTED_INDEX]);
+    BACKUP_FILES       = _IS_CHECKED(IDC_CHECKBOX_BACKUP);
+    REMOVE_CONTENT_DIR = _IS_CHECKED(IDC_CHECKBOX_REMOVE_LIB_FOLDER);
 
-    int response = MessageBox(hwnd, msg, "Confirm Removal", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
+    remove_lib_dialog_data data = {
+      .library            = &LIBRARIES[SELECTED_INDEX],
+      .backup_files       = BACKUP_FILES,
+      .remove_content_dir = REMOVE_CONTENT_DIR,
+    };
 
-    if (response == IDYES) {
-        BACKUP_FILES = _IS_CHECKED(H_BACKUP_CHECKBOX);
+    INT_PTR result = DialogBoxParam(GetModuleHandle(NULL),
+                                    MAKEINTRESOURCE(IDD_REMOVE_LIBRARYBOX),
+                                    hwnd,
+                                    remove_library_dialog_proc,
+                                    (LPARAM)&data);
+
+    if (result == IDREMOVE) {
+        BACKUP_FILES       = data.backup_files;
+        REMOVE_CONTENT_DIR = data.remove_content_dir;
+
         BOOL removed = remove_selected_library();
-
         if (!removed) {
-            MessageBox(hwnd, "Failed to remove library", "Error", MB_OK | MB_ICONERROR);
+            MessageBox(hwnd, "Failed to remove library. Check K8-LRT.log for details.", "Error", MB_OK | MB_ICONERROR);
             return;
         } else {
             BOOL query_result = query_libraries(hwnd);
@@ -1156,8 +1581,7 @@ void on_remove_selected(HWND hwnd) {
             } else {
                 MessageBox(hwnd,
                            "Failed to query libraries. Do you have any Kontakt libraries "
-                           "installed?\n\nCheck "
-                           "'K8-LRT.log' for details.",
+                           "installed?\n\nCheck 'K8-LRT.log' for details.",
                            "Error",
                            MB_OK | MB_ICONERROR);
                 PostQuitMessage(0);
@@ -1167,36 +1591,75 @@ void on_remove_selected(HWND hwnd) {
 }
 
 void on_remove_all(HWND hwnd) {
-    int response = MessageBox(hwnd,
-                              "Are you sure you want to permanently remove all libraries?",
-                              "Confirm Removal",
-                              MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
+    if (LIB_COUNT == 0) {
+        MessageBox(hwnd, "No libraries found to remove.", "No Libraries", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
 
-    if (response == IDYES) {
-        BACKUP_FILES   = _IS_CHECKED(H_BACKUP_CHECKBOX);
-        SELECTED_INDEX = -1;
+    BACKUP_FILES       = _IS_CHECKED(IDC_CHECKBOX_BACKUP);
+    REMOVE_CONTENT_DIR = _IS_CHECKED(IDC_CHECKBOX_REMOVE_LIB_FOLDER);
 
-        for (int i = 0; i < LIB_COUNT; i++) {
-            BOOL removed = remove_library(LIBRARIES[i]);
-            if (!removed) {
-                _ERROR("Failed to remove library: '%s'", LIBRARIES[SELECTED_INDEX]);
+    BOOL* selected = _ALLOC_ARRAY(BOOL, LIB_COUNT);
+    for (int i = 0; i < LIB_COUNT; i++) {
+        selected[i] = TRUE;  // All selected by default
+    }
+
+    batch_removal_dialog_data dialog_data = {.libraries             = LIBRARIES,
+                                             .lib_count             = LIB_COUNT,
+                                             .selected              = selected,
+                                             .backup_files          = BACKUP_FILES,
+                                             .remove_library_folder = REMOVE_CONTENT_DIR,
+                                             .selected_count        = LIB_COUNT};
+
+    INT_PTR result = DialogBoxParam(GetModuleHandle(NULL),
+                                    MAKEINTRESOURCE(IDD_BATCH_REMOVEBOX),
+                                    hwnd,
+                                    batch_remove_dialog_proc,
+                                    (LPARAM)&dialog_data);
+
+    if (result == IDREMOVE_BATCH) {
+        BACKUP_FILES       = dialog_data.backup_files;
+        REMOVE_CONTENT_DIR = dialog_data.remove_library_folder;
+
+        int removed_count = 0;
+        int failed_count  = 0;
+
+        for (int i = 0; i < dialog_data.lib_count; i++) {
+            if (dialog_data.selected[i]) {
+                BOOL removed = remove_library(&LIBRARIES[i], REMOVE_CONTENT_DIR);
+                if (removed) {
+                    removed_count++;
+                } else {
+                    failed_count++;
+                    _ERROR("Failed to remove library: '%s'", LIBRARIES[i]);
+                }
             }
-            i++;
         }
 
         BOOL query_result = query_libraries(hwnd);
-        if (query_result) {
-            EnableWindow(H_REMOVE_BUTTON, FALSE);
-            MessageBox(hwnd, "Successfully removed all libraries.", "Success", MB_OK | MB_ICONINFORMATION);
+
+        char result_msg[256];
+        if (failed_count == 0) {
+            sprintf_s(result_msg, sizeof(result_msg), "Successfully removed %d library(ies).", removed_count);
+            MessageBox(hwnd, result_msg, "Success", MB_OK | MB_ICONINFORMATION);
         } else {
+            sprintf_s(result_msg,
+                      sizeof(result_msg),
+                      "Removed %d library(ies).\n%d failed.\n\nCheck K8-LRT.log for details.",
+                      removed_count,
+                      failed_count);
+            MessageBox(hwnd, result_msg, "Partial Success", MB_OK | MB_ICONWARNING);
+        }
+
+        if (!query_result) {
             MessageBox(hwnd,
-                       "Failed to query libraries. Do you have any Kontakt libraries "
-                       "installed?\n\nCheck "
-                       "'K8-LRT.log' for details.",
+                       "Failed to query libraries.\n\nCheck 'K8-LRT.log' for details.",
                        "Error",
                        MB_OK | MB_ICONERROR);
-            PostQuitMessage(0);
         }
+
+        EnableWindow(H_REMOVE_BUTTON, FALSE);
+        SELECTED_INDEX = -1;
     }
 }
 
@@ -1265,40 +1728,6 @@ void on_exit(HWND hwnd) {
     }
 }
 
-void on_check_for_updates(HWND hwnd) {
-    char* latest_version = get_latest_version();
-    if (!latest_version) {
-        MessageBox(hwnd, "Failed to check for updates.", "Update Check", MB_OK | MB_ICONERROR);
-        return;
-    }
-
-    int comparison = compare_versions(VER_PRODUCTVERSION_STR, latest_version);
-    if (comparison != 0) {
-        char message[512];
-        sprintf_s(message,
-                  512,
-                  "A new version of K8-LRT is available!\n\n"
-                  "Current: %s\n"
-                  "Latest: %s\n\n"
-                  "Visit the GitHub releases page to download?",
-                  VER_PRODUCTVERSION_STR,
-                  latest_version + 1);
-
-        int result = MessageBoxA(NULL, message, "Update Available", MB_YESNO | MB_ICONINFORMATION);
-
-        if (result == IDYES) {
-            ShellExecuteA(NULL,
-                          "open",
-                          "https://github.com/jakerieger/K8-LRT/releases/latest",
-                          NULL,
-                          NULL,
-                          SW_SHOWNORMAL);
-        }
-    } else {
-        MessageBoxA(NULL, "You're running the latest version!", "Up to Date", MB_OK | MB_ICONINFORMATION);
-    }
-}
-
 void on_about(HWND hwnd) {
     const char* version = VER_PRODUCTVERSION_STR;
     DialogBoxParam(GetModuleHandle(NULL), MAKEINTRESOURCE(IDD_ABOUTBOX), hwnd, about_dialog_proc, (LPARAM)version);
@@ -1312,6 +1741,9 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM lparam) {
     switch (umsg) {
         case WM_CREATE:
             return on_create(hwnd);
+
+        case WM_SHOWWINDOW:
+            return on_show(hwnd);
 
         case WM_ERASEBKGND: {
             HDC hdc = (HDC)wparam;
@@ -1351,7 +1783,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM lparam) {
                 }
 
                 case ID_HELP_CHECK_UPDATES: {
-                    on_check_for_updates(hwnd);
+                    check_for_updates(hwnd);
                     break;
                 }
 
