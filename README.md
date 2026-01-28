@@ -18,7 +18,7 @@ Locations that need to be searched and deleted:
 
 ## Quickstart
 
-The latest version of K8-LRT is v1.0.0 - you can [download it here](https://github.com/jakerieger/K8-LRT/releases/latest).
+The latest version of K8-LRT is v1.1.0 - you can [download it here](https://github.com/jakerieger/K8-LRT/releases/latest).
 
 Check out the [Quickstart](docs/QUICKSTART.md) guide for info on how to use K8-LRT.
 

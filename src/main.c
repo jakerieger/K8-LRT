@@ -66,7 +66,8 @@ typedef enum {
     LOG_DEBUG,
 } log_level;
 
-static FILE* LOG_FILE = NULL;
+static BOOL ATTACHED_TO_CONSOLE = FALSE;
+static FILE* LOG_FILE           = NULL;
 
 void log_msg(log_level level, const char* fmt, ...) {
     if (!LOG_FILE)
@@ -109,6 +110,21 @@ void log_msg(log_level level, const char* fmt, ...) {
     va_list args;
     va_start(args, fmt);
     vfprintf(LOG_FILE, fmt, args);
+#ifndef NDEBUG
+    if (ATTACHED_TO_CONSOLE) {
+        printf("[%04d-%02d-%02d %02d:%02d:%02d.%03d] [%s] ",
+               st.wYear,
+               st.wMonth,
+               st.wDay,
+               st.wHour,
+               st.wMinute,
+               st.wSecond,
+               st.wMilliseconds,
+               level_str);
+        vprintf(fmt, args);
+        printf("\n");
+    }
+#endif
     va_end(args);
 
     fprintf(LOG_FILE, "\n");
@@ -224,13 +240,16 @@ static HWND H_BACKUP_CHECKBOX            = NULL;  // Whether or not we should ba
 static HWND H_LOG_VIEWER                 = NULL;
 static HWND H_REMOVE_LIB_FOLDER_CHECKBOX = NULL;
 static HWND H_SELECT_LIB_LABEL           = NULL;
+static HWND H_RELOCATE_BUTTON            = NULL;
+
+static HFONT UI_FONT = NULL;
 
 //====================================================================//
 //                          -- GLOBALS --                             //
 //====================================================================//
 
 #define _WINDOW_W 300
-#define _WINDOW_H 406
+#define _WINDOW_H 436
 #define _WINDOW_CLASS "K8LRT_WindowClass\0"
 #define _WINDOW_TITLE "K8-LRT - v" VER_PRODUCTVERSION_STR
 
@@ -411,8 +430,10 @@ void attach_console() {
         FILE* f_dummy;
         freopen_s(&f_dummy, "CONOUT$", "w", stdout);
         freopen_s(&f_dummy, "CONOUT$", "w", stderr);
+        ATTACHED_TO_CONSOLE = TRUE;
         _LOG("Attached debug console");
     } else {
+        ATTACHED_TO_CONSOLE = FALSE;
         _WARN("Failed to attach debug console (process must be executed from within a shell)");
     }
 }
@@ -1033,6 +1054,96 @@ void update_batch_count_label(HWND hwnd, int count) {
 }
 
 //====================================================================//
+//                     -- UI HELPER FUNCTIONS --                      //
+//====================================================================//
+
+void create_button(HWND* button, const char* label, int x, int y, int w, int h, HWND hwnd, int menu, BOOL disabled) {
+    _ASSERT(button != NULL);
+
+    DWORD style = WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON;
+    if (disabled)
+        style |= WS_DISABLED;
+
+    *button = CreateWindowEx(0, "BUTTON", label, style, x, y, w, h, hwnd, (HMENU)menu, GetModuleHandle(NULL), NULL);
+    SendMessage(*button, WM_SETFONT, (WPARAM)UI_FONT, TRUE);
+}
+
+void create_checkbox(HWND* checkbox,
+                     const char* label,
+                     int x,
+                     int y,
+                     int w,
+                     int h,
+                     HWND hwnd,
+                     int menu,
+                     BOOL begin_checked,
+                     BOOL disabled) {
+    _ASSERT(checkbox != NULL);
+
+    DWORD style = WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX;
+    if (disabled)
+        style |= WS_DISABLED;
+
+    *checkbox = CreateWindowEx(0, "BUTTON", label, style, x, y, w, h, hwnd, (HMENU)menu, GetModuleHandle(NULL), NULL);
+    SendMessage(*checkbox, WM_SETFONT, (WPARAM)UI_FONT, TRUE);
+
+    if (begin_checked)
+        SendMessage(*checkbox, BM_SETCHECK, (WPARAM)TRUE, TRUE);
+}
+
+void create_label(HWND* label, const char* text, int x, int y, int w, int h, HWND hwnd) {
+    _ASSERT(label != NULL);
+
+    *label = CreateWindow("STATIC",
+                          text,
+                          WS_CHILD | WS_VISIBLE | SS_LEFT,
+                          x,
+                          y,
+                          w,
+                          h,
+                          hwnd,
+                          NULL,
+                          GetModuleHandle(NULL),
+                          NULL);
+    SendMessage(*label, WM_SETFONT, (WPARAM)UI_FONT, TRUE);
+}
+
+void create_listbox(HWND* listbox, int x, int y, int w, int h, HWND hwnd, int menu) {
+    _ASSERT(listbox != NULL);
+
+    *listbox = CreateWindowEx(WS_EX_CLIENTEDGE,
+                              "LISTBOX",
+                              NULL,
+                              WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY,
+                              x,
+                              y,
+                              w,
+                              h,
+                              hwnd,
+                              (HMENU)menu,
+                              GetModuleHandle(NULL),
+                              NULL);
+    SendMessage(*listbox, WM_SETFONT, (WPARAM)UI_FONT, TRUE);
+}
+
+void create_menu_bar(HWND hwnd) {
+    HMENU h_menubar = CreateMenu();
+    HMENU h_menu    = CreateMenu();
+
+    AppendMenu(h_menu, MF_STRING, ID_MENU_VIEW_LOG, "&View Log");
+    AppendMenu(h_menu, MF_STRING, ID_MENU_RELOAD_LIBRARIES, "&Reload Libraries");
+    AppendMenu(h_menu, MF_STRING, ID_MENU_COLLECT_BACKUPS, "&Collect Backups and Zip");
+    AppendMenu(h_menu, MF_SEPARATOR, 0, NULL);
+    AppendMenu(h_menu, MF_STRING, ID_MENU_CHECK_UPDATES, "&Check for Updates");
+    AppendMenu(h_menu, MF_STRING, ID_MENU_ABOUT, "&About");
+    AppendMenu(h_menu, MF_SEPARATOR, 0, NULL);
+    AppendMenu(h_menu, MF_STRING, ID_MENU_EXIT, "E&xit");
+
+    AppendMenu(h_menubar, MF_POPUP, (UINT_PTR)h_menu, "&Menu");
+    SetMenu(hwnd, h_menubar);
+}
+
+//====================================================================//
 //                      -- DIALOG CALLBACKS --                        //
 //====================================================================//
 
@@ -1414,130 +1525,58 @@ INT_PTR CALLBACK batch_remove_dialog_proc(HWND hwnd, UINT umsg, WPARAM wparam, L
 //====================================================================//
 
 LRESULT on_create(HWND hwnd) {
-    HMENU h_menubar = CreateMenu();
-    HMENU h_menu    = CreateMenu();
+    UI_FONT = CreateFont(16,
+                         0,
+                         0,
+                         0,
+                         FW_NORMAL,
+                         FALSE,
+                         FALSE,
+                         FALSE,
+                         DEFAULT_CHARSET,
+                         OUT_DEFAULT_PRECIS,
+                         CLIP_DEFAULT_PRECIS,
+                         DEFAULT_QUALITY,
+                         DEFAULT_PITCH | FF_DONTCARE,
+                         "Segoe UI");
+    if (!UI_FONT) {
+        _WARN("Failed to create UI font. Falling back to system default.");
+    }
 
-    AppendMenu(h_menu, MF_STRING, ID_FILE_VIEW_LOG, "&View Log");
-    AppendMenu(h_menu, MF_STRING, ID_FILE_RELOAD_LIBRARIES, "&Reload Libraries");
-    AppendMenu(h_menu, MF_SEPARATOR, 0, NULL);
-    AppendMenu(h_menu, MF_STRING, ID_HELP_CHECK_UPDATES, "&Check for Updates");
-    AppendMenu(h_menu, MF_STRING, ID_HELP_ABOUT, "&About");
-    AppendMenu(h_menu, MF_SEPARATOR, 0, NULL);
-    AppendMenu(h_menu, MF_STRING, ID_FILE_EXIT, "E&xit");
+    create_menu_bar(hwnd);
 
-    AppendMenu(h_menubar, MF_POPUP, (UINT_PTR)h_menu, "&Menu");
+    create_label(&H_SELECT_LIB_LABEL, "Select a library to remove:", 10, 10, 265, 36, hwnd);
+    create_listbox(&H_LISTBOX, 10, 36, 265, 240, hwnd, IDC_LISTBOX);
 
-    SetMenu(hwnd, h_menubar);
+    create_checkbox(&H_BACKUP_CHECKBOX,
+                    "Backup cache files before deleting",
+                    10,
+                    260,
+                    220,
+                    20,
+                    hwnd,
+                    IDC_CHECKBOX_BACKUP,
+                    TRUE,
+                    FALSE);
+    create_checkbox(&H_REMOVE_LIB_FOLDER_CHECKBOX,
+                    "Delete library content directory",
+                    10,
+                    280,
+                    220,
+                    20,
+                    hwnd,
+                    IDC_CHECKBOX_REMOVE_LIB_FOLDER,
+                    TRUE,
+                    FALSE);
 
-    H_SELECT_LIB_LABEL = CreateWindow("STATIC",
-                                      "Select a library to remove:",
-                                      WS_CHILD | WS_VISIBLE | SS_LEFT,
-                                      10,
-                                      10,
-                                      265,
-                                      20,
-                                      hwnd,
-                                      NULL,
-                                      GetModuleHandle(NULL),
-                                      NULL);
-
-    H_LISTBOX = CreateWindowEx(WS_EX_CLIENTEDGE,
-                               "LISTBOX",
-                               NULL,
-                               WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY,
-                               10,
-                               36,
-                               265,
-                               240,
-                               hwnd,
-                               (HMENU)IDC_LISTBOX,
-                               GetModuleHandle(NULL),
-                               NULL);
-
-    H_BACKUP_CHECKBOX = CreateWindowEx(0,
-                                       "BUTTON",
-                                       "Backup cache files before deleting",
-                                       WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX,
-                                       10,
-                                       260,
-                                       220,
-                                       20,
-                                       hwnd,
-                                       (HMENU)IDC_CHECKBOX_BACKUP,
-                                       GetModuleHandle(NULL),
-                                       NULL);
-
-    H_REMOVE_LIB_FOLDER_CHECKBOX = CreateWindowEx(0,
-                                                  "BUTTON",
-                                                  "Delete library folder",
-                                                  WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX,
-                                                  10,
-                                                  280,
-                                                  220,
-                                                  20,
-                                                  hwnd,
-                                                  (HMENU)IDC_CHECKBOX_BACKUP,
-                                                  GetModuleHandle(NULL),
-                                                  NULL);
-
-    H_REMOVE_ALL_BUTTON = CreateWindowEx(0,
-                                         "BUTTON",
-                                         "Remove All...",
-                                         WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                         10,
-                                         306,
-                                         130,
-                                         30,
-                                         hwnd,
-                                         (HMENU)IDC_REMOVE_ALL_BUTTON,
-                                         GetModuleHandle(NULL),
-                                         NULL);
-
-    H_REMOVE_BUTTON = CreateWindowEx(0,
-                                     "BUTTON",
-                                     "Remove Selected",
-                                     WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_DISABLED,
-                                     147,
-                                     306,
-                                     130,
-                                     30,
-                                     hwnd,
-                                     (HMENU)IDC_REMOVE_BUTTON,
-                                     GetModuleHandle(NULL),
-                                     NULL);
-
-    HFONT h_font = CreateFont(16,
-                              0,
-                              0,
-                              0,
-                              FW_NORMAL,
-                              FALSE,
-                              FALSE,
-                              FALSE,
-                              DEFAULT_CHARSET,
-                              OUT_DEFAULT_PRECIS,
-                              CLIP_DEFAULT_PRECIS,
-                              DEFAULT_QUALITY,
-                              DEFAULT_PITCH | FF_DONTCARE,
-                              "Segoe UI");
-
-    SendMessage(H_SELECT_LIB_LABEL, WM_SETFONT, (WPARAM)h_font, TRUE);
-    SendMessage(H_LISTBOX, WM_SETFONT, (WPARAM)h_font, TRUE);
-    SendMessage(H_REMOVE_ALL_BUTTON, WM_SETFONT, (WPARAM)h_font, TRUE);
-    SendMessage(H_REMOVE_BUTTON, WM_SETFONT, (WPARAM)h_font, TRUE);
-
-    SendMessage(H_BACKUP_CHECKBOX, WM_SETFONT, (WPARAM)h_font, TRUE);
-    SendMessage(H_BACKUP_CHECKBOX, BM_SETCHECK, (WPARAM)TRUE, TRUE);
-
-    SendMessage(H_REMOVE_LIB_FOLDER_CHECKBOX, WM_SETFONT, (WPARAM)h_font, TRUE);
-    SendMessage(H_REMOVE_LIB_FOLDER_CHECKBOX, BM_SETCHECK, (WPARAM)TRUE, TRUE);
+    create_button(&H_REMOVE_ALL_BUTTON, "Remove All...", 10, 306, 130, 30, hwnd, IDC_REMOVE_ALL_BUTTON, FALSE);
+    create_button(&H_REMOVE_BUTTON, "Remove Selected", 147, 306, 130, 30, hwnd, IDC_REMOVE_BUTTON, TRUE);
+    create_button(&H_RELOCATE_BUTTON, "Relocate Selected", 10, 340, 266, 26, hwnd, IDC_RELOCATE_BUTTON, TRUE);
 
     return 0;
 }
 
 LRESULT on_show(HWND hwnd) {
-    check_for_updates(hwnd, FALSE);
-
     // Search registry for key entries in `HKEY_LOCAL_MACHINE/SOFTWARE/Native Instruments/..`
     BOOL query_result = query_libraries(hwnd);
     if (!query_result) {
@@ -1549,6 +1588,8 @@ LRESULT on_show(HWND hwnd) {
         PostQuitMessage(0);
     }
 
+    check_for_updates(hwnd, FALSE);
+
     return 0;
 }
 
@@ -1558,6 +1599,7 @@ void on_selection_changed(HWND hwnd) {
         SELECTED_INDEX = sel;
     }
     EnableWindow(H_REMOVE_BUTTON, (sel != LB_ERR));
+    EnableWindow(H_RELOCATE_BUTTON, (sel != LB_ERR));
 }
 
 void on_remove_selected(HWND hwnd) {
@@ -1778,27 +1820,27 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM lparam) {
 
         case WM_COMMAND: {
             switch (LOWORD(wparam)) {
-                case ID_FILE_VIEW_LOG: {
+                case ID_MENU_VIEW_LOG: {
                     on_view_log(hwnd);
                     break;
                 }
 
-                case ID_FILE_RELOAD_LIBRARIES: {
+                case ID_MENU_RELOAD_LIBRARIES: {
                     on_reload_libraries(hwnd);
                     break;
                 }
 
-                case ID_FILE_EXIT: {
+                case ID_MENU_EXIT: {
                     on_exit(hwnd);
                     break;
                 }
 
-                case ID_HELP_CHECK_UPDATES: {
+                case ID_MENU_CHECK_UPDATES: {
                     check_for_updates(hwnd, TRUE);
                     break;
                 }
 
-                case ID_HELP_ABOUT: {
+                case ID_MENU_ABOUT: {
                     on_about(hwnd);
                     break;
                 }
@@ -1839,11 +1881,11 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM lparam) {
 //====================================================================//
 
 int WINAPI WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_cmd_line, int n_cmd_show) {
-    log_init("K8-LRT.log");
-
 #ifndef NDEBUG
     attach_console();
 #endif
+
+    log_init("K8-LRT.log");
 
     // Initialize common controls
     INITCOMMONCONTROLSEX icc;
@@ -1896,6 +1938,7 @@ int WINAPI WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_cmd
 
 #ifndef NDEBUG
     if (FreeConsole()) {
+        ATTACHED_TO_CONSOLE = FALSE;
         _LOG("Detached debug console");
     }
 #endif
