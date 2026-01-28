@@ -24,6 +24,12 @@ Check out the [Quickstart](docs/QUICKSTART.md) guide for info on how to use K8-L
 
 ## Changelog
 
+### 1.2.0 (TBD)
+
+K8-LRT v1.2.0 brings a lot of bug fixes and reworks a large portion of the code base to improve both reliability but also maintainability.
+
+#### Added
+
 ### 1.1.0 (January 26, 2026)
 
 #### Added

@@ -154,7 +154,7 @@ void log_close(void) {
 #define _FATAL(fmt, ...)                                                                                               \
     do {                                                                                                               \
         log_msg(LOG_FATAL, fmt, ##__VA_ARGS__);                                                                        \
-        exit(1);                                                                                                       \
+        quick_exit(1);                                                                                                 \
     } while (FALSE)
 #define _LOG(fmt, ...) log_msg(LOG_DEBUG, fmt, ##__VA_ARGS__)
 
@@ -261,6 +261,7 @@ static HFONT UI_FONT = NULL;
 #define _STREQ(s1, s2) strcmp(s1, s2) == 0
 #define _IS_CHECKED(checkbox) (IsDlgButtonChecked(hwnd, checkbox) == BST_CHECKED)
 #define _MAX_LIB_COUNT 512
+#define _MAX_KEY_LENGTH 255
 
 #define _LIB_CACHE_ROOT "Native Instruments\\Kontakt 8\\LibrariesCache\0"
 #define _DB3_ROOT "Native Instruments\\Kontakt 8\\komplete.db3\0"
@@ -539,108 +540,112 @@ void clear_libraries(void) {
     LIB_COUNT      = 0;
 }
 
-BOOL query_libraries(HWND hwnd) {
-    clear_libraries();
-
-    HKEY h_key;
-    LPCSTR base_path = "SOFTWARE\\Native Instruments";
-
-    LONG result = RegOpenKeyExA(HKEY_LOCAL_MACHINE, base_path, 0, KEY_READ, &h_key);
+BOOL open_regisry_key(HKEY* key, HKEY base, const char* path, UINT sam) {
+    LONG result = RegOpenKeyExA(base, path, 0, (REGSAM)sam, key);
     if (result != ERROR_SUCCESS) {
-        _ERROR("Failed to open registry key: '%s'", base_path);
+        _ERROR("Failed to open registry key: '%s'", path);
         return FALSE;
     }
 
-    char ach_key[255];
-    DWORD cb_name = sizeof(ach_key);
-    FILETIME ft_last_write_time;
+    return TRUE;
+}
 
-    DWORD found = 0;
-    while (RegEnumKeyExA(h_key, found, ach_key, &cb_name, NULL, NULL, NULL, &ft_last_write_time) == ERROR_SUCCESS) {
-        _INFO("Found registry entry: '%s'", ach_key);
+void close_registry_key(HKEY* key) {
+    RegCloseKey(*key);
+}
 
-        if ((ARENA->position - _ARENA_BASE) + sizeof(library_entry) > ARENA->capacity) {
-            RegCloseKey(h_key);
-            _ERROR("Memory capacity reached (%d > %d)",
-                   (ARENA->position - _ARENA_BASE) + sizeof(library_entry),
-                   ARENA->capacity);
-            return FALSE;
-        }
+int enumerate_registry_keys(HKEY key, char* keys[]) {
+    char current_key[_MAX_KEY_LENGTH];
+    DWORD buffer_size = sizeof(current_key);
+    FILETIME ft_last;
+    DWORD index = 0;
 
-        BOOL in_exclusion_list = list_contains(KEY_EXCLUSION_LIST, KEY_EXCLUSION_LIST_SIZE, ach_key);
-        BOOL matches_exclusion_pattern =
-          matches_pattern_in_list(KEY_EXCLUSION_PATTERNS, KEY_EXCLUSION_PATTERNS_SIZE, ach_key);
+    while (RegEnumKeyExA(key, index, current_key, &buffer_size, NULL, NULL, NULL, &ft_last) == ERROR_SUCCESS) {
+        _INFO("Found registry entry: '%s'", current_key);
+        const size_t key_len = strlen(current_key);
+        char* key_memory     = _ALLOC_STR(key_len + 1);
+        memcpy(key_memory, current_key, key_len);
+        key_memory[key_len] = '\0';
+        keys[index]         = key_memory;
 
-        if (!in_exclusion_list && !matches_exclusion_pattern) {
-            // Fetch ContentDir value
-            HKEY h_subkey;
-            if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, join_paths(base_path, ach_key), 0, KEY_READ, &h_subkey) ==
-                ERROR_SUCCESS) {
-                char content_path[MAX_PATH];
-                DWORD buffer_size = sizeof(content_path);
-                DWORD value_type;
-
-                const int key_len = strlen(ach_key);
-                char* key_memory  = _ALLOC_STR(key_len + 1);
-                memcpy(key_memory, ach_key, key_len);
-                key_memory[key_len] = '\0';
-
-                library_entry entry = {.name = key_memory, NULL};
-
-                LSTATUS status =
-                  RegQueryValueExA(h_subkey, "ContentDir", NULL, &value_type, (LPBYTE)content_path, &buffer_size);
-
-                if (status == ERROR_SUCCESS && value_type == REG_SZ) {
-                    const int content_dir_len = strlen(content_path);
-
-                    // Move key and content_dir strings to arena so the original memory can be freed
-                    char* content_dir_memory = _ALLOC_STR(content_dir_len + 1);
-                    memcpy(content_dir_memory, content_path, content_dir_len);
-                    content_dir_memory[content_dir_len] = '\0';
-
-                    entry.content_dir = content_dir_memory;
-
-                    memcpy(&LIBRARIES[LIB_COUNT], &entry, sizeof(entry));
-                    SendMessage(H_LISTBOX, LB_INSERTSTRING, LIB_COUNT, (LPARAM)LIBRARIES[LIB_COUNT].name);
-
-                    _INFO("Found library entry: '%s (%s)'",
-                          LIBRARIES[LIB_COUNT].name,
-                          LIBRARIES[LIB_COUNT].content_dir);
-
-                    LIB_COUNT++;
-                } else if (status == ERROR_MORE_DATA) {
-                    // TODO: Handle cases where the path length > MAX_PATH
-                    _ERROR("ContentDir value length is greater than MAX_PATH (%d) for registry key: "
-                           "'HKEY_LOCAL_MACHINE\\%s\\%s'",
-                           MAX_PATH,
-                           base_path,
-                           ach_key);
-                    RegCloseKey(h_subkey);
-                    RegCloseKey(h_key);
-                    return FALSE;
-                } else {
-                    _WARN("Failed to retrieve ContentDir value for registry key: 'HKEY_LOCAL_MACHINE\\%s\\%s'",
-                          base_path,
-                          ach_key);
-                    memcpy(&LIBRARIES[LIB_COUNT], &entry, sizeof(entry));
-                    SendMessage(H_LISTBOX, LB_INSERTSTRING, LIB_COUNT, (LPARAM)LIBRARIES[LIB_COUNT].name);
-
-                    _INFO("Found library entry: '%s (%s)'",
-                          LIBRARIES[LIB_COUNT].name,
-                          LIBRARIES[LIB_COUNT].content_dir);
-
-                    LIB_COUNT++;
-                }
-
-                RegCloseKey(h_subkey);
-            }
-        }
-
-        cb_name = sizeof(ach_key);
-        found++;
+        buffer_size = sizeof(current_key);
+        index++;
     }
 
-    RegCloseKey(h_key);
+    return index;
+}
+
+const char* get_registry_value_str(HKEY key, const char* value_name) {
+    char value[MAX_PATH];
+    DWORD buffer_size = sizeof(value);
+    DWORD value_type;
+
+    LSTATUS status = RegQueryValueExA(key, value_name, NULL, &value_type, (LPBYTE)value, &buffer_size);
+    if (status == ERROR_SUCCESS && value_type == REG_SZ) {
+        const size_t value_len = strlen(value);
+        char* value_memory     = _ALLOC_STR(value_len + 1);
+        memcpy(value_memory, value, value_len);
+        value_memory[value_len] = '\0';
+
+        return value_memory;
+    }
+
+    return NULL;
+}
+
+BOOL query_libraries(HWND hwnd) {
+    clear_libraries();
+
+    HKEY base_key;
+    LPCSTR base_path = "SOFTWARE\\Native Instruments";
+    BOOL result      = open_regisry_key(&base_key, HKEY_LOCAL_MACHINE, base_path, KEY_READ);
+    if (!result)
+        return FALSE;
+
+    char** keys   = _ALLOC_ARRAY(char*, _MAX_LIB_COUNT);
+    int key_count = enumerate_registry_keys(base_key, keys);
+
+    close_registry_key(&base_key);
+
+    for (int i = 0; i < key_count; i++) {
+        if ((ARENA->position - _ARENA_BASE) + sizeof(library_entry) > ARENA->capacity) {
+            _FATAL("Memory capacity reached (%d > %d)",
+                   (ARENA->position - _ARENA_BASE) + sizeof(library_entry),
+                   ARENA->capacity);
+        }
+
+        const char* key_str = keys[i];
+
+        BOOL in_exclusion_list = list_contains(KEY_EXCLUSION_LIST, KEY_EXCLUSION_LIST_SIZE, key_str);
+        BOOL matches_exclusion_pattern =
+          matches_pattern_in_list(KEY_EXCLUSION_PATTERNS, KEY_EXCLUSION_PATTERNS_SIZE, key_str);
+        if (in_exclusion_list || matches_exclusion_pattern)
+            continue;
+
+        HKEY key;
+        BOOL result = open_regisry_key(&key, HKEY_LOCAL_MACHINE, join_paths(base_path, key_str), KEY_READ);
+        if (!result)
+            continue;
+
+        library_entry entry     = {.name = key_str, NULL};
+        const char* content_dir = get_registry_value_str(key, "ContentDir");
+
+        if (content_dir != NULL) {
+            entry.content_dir = content_dir;
+        } else {
+            _WARN("Failed to retrieve ContentDir value for registry key: 'HKEY_LOCAL_MACHINE\\%s\\%s'",
+                  base_path,
+                  key_str);
+        }
+
+        memcpy(&LIBRARIES[LIB_COUNT], &entry, sizeof(entry));
+        SendMessage(H_LISTBOX, LB_INSERTSTRING, LIB_COUNT, (LPARAM)LIBRARIES[LIB_COUNT].name);
+
+        _INFO("Found library entry: '%s (%s)'", LIBRARIES[LIB_COUNT].name, LIBRARIES[LIB_COUNT].content_dir);
+
+        LIB_COUNT++;
+        close_registry_key(&key);
+    }
 
     _INFO("Finished querying registry entries (found %d library entries)", LIB_COUNT);
 
@@ -1716,6 +1721,14 @@ void on_remove_all(HWND hwnd) {
     }
 }
 
+void on_relocate_selected(HWND hwnd) {
+    const char* content_dir = LIBRARIES[SELECTED_INDEX].content_dir;
+
+    // 1. Copy library to new directory
+    // 2. Delete original library directory
+    // 3. Update registry key
+}
+
 void on_view_log(HWND hwnd) {
     if (H_LOG_VIEWER && IsWindow(H_LOG_VIEWER)) {
         SetForegroundWindow(H_LOG_VIEWER);
@@ -1860,6 +1873,11 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM lparam) {
                         on_selection_changed(hwnd);
                     }
 
+                    break;
+                }
+
+                case IDC_RELOCATE_BUTTON: {
+                    on_relocate_selected(hwnd);
                     break;
                 }
             }

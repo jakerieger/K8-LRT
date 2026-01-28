@@ -34,7 +34,7 @@ BEGIN
     ICON            IDI_APPICON, IDC_STATIC, 14, 20, 20, 20
     LTEXT           "You are about to remove the following library:", IDC_STATIC, 44, 14, 260, 8
     LTEXT           "", IDC_REMOVE_LIBRARY_NAME, 44, 28, 260, 12, SS_NOPREFIX
-    LTEXT           "", IDC_REMOVE_LIBRARY_CONTENT_DIR, 44, 38, 260, 12, SS_NOPREFIX
+    LTEXT           "", IDC_REMOVE_LIBRARY_CONTENT_DIR, 44, 38, 260, 24, SS_NOPREFIX
     
     GROUPBOX        "This operation will:", IDC_STATIC, 14, 60, 292, 70
     LTEXT           "- Delete registry entries\n- Remove XML configuration files\n- Clear library cache files\n- Reset the Kontakt database\n- Remove Native Access JWT tokens", 
