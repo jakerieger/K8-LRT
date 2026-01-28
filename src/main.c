@@ -1,5 +1,5 @@
 /*
-    K8-LRT - v1.1.0 - Library removal tool for Bobdule's Kontakt 8
+    K8-LRT - v1.2.0 - Library removal tool for Bobdule's Kontakt 8
 
     LICENSE
 
@@ -32,6 +32,7 @@
 
     REVISION HISTORY
 
+        1.2.0  (TBD)         bug fixes for registry querying
         1.1.0  (2026-01-26)  additional directory checks and removals, UI additions and changes
         1.0.0  (2026-01-25)  UI redux, added functionality, updates
         0.3.1  (2026-01-23)  memory model improvements
@@ -114,12 +115,12 @@ void log_msg(log_level level, const char* fmt, ...) {
     fflush(LOG_FILE);
 }
 
-void log_init(HWND hwnd, const char* filename) {
+void log_init(const char* filename) {
     errno_t result = fopen_s(&LOG_FILE, filename, "a+");  // append (+ read) mode
     if (result == 0) {
         log_msg(LOG_INFO, "--- K8-LRT Started ---");
     } else {
-        MessageBox(hwnd, "Failed to initialize logger.", "Fatal", MB_OK | MB_ICONERROR);
+        MessageBox(NULL, "Failed to initialize logger.", "Fatal", MB_OK | MB_ICONERROR);
         exit(1);
     }
 }
@@ -222,6 +223,7 @@ static HWND H_REMOVE_ALL_BUTTON          = NULL;
 static HWND H_BACKUP_CHECKBOX            = NULL;  // Whether or not we should backup delete filesa
 static HWND H_LOG_VIEWER                 = NULL;
 static HWND H_REMOVE_LIB_FOLDER_CHECKBOX = NULL;
+static HWND H_SELECT_LIB_LABEL           = NULL;
 
 //====================================================================//
 //                          -- GLOBALS --                             //
@@ -411,7 +413,7 @@ void attach_console() {
         freopen_s(&f_dummy, "CONOUT$", "w", stderr);
         _LOG("Attached debug console");
     } else {
-        _ERROR("Failed to attach debug console");
+        _WARN("Failed to attach debug console (process must be executed from within a shell)");
     }
 }
 
@@ -534,6 +536,8 @@ BOOL query_libraries(HWND hwnd) {
 
     DWORD found = 0;
     while (RegEnumKeyExA(h_key, found, ach_key, &cb_name, NULL, NULL, NULL, &ft_last_write_time) == ERROR_SUCCESS) {
+        _INFO("Found registry entry: '%s'", ach_key);
+
         if ((ARENA->position - _ARENA_BASE) + sizeof(library_entry) > ARENA->capacity) {
             RegCloseKey(h_key);
             _ERROR("Memory capacity reached (%d > %d)",
@@ -555,30 +559,33 @@ BOOL query_libraries(HWND hwnd) {
                 DWORD buffer_size = sizeof(content_path);
                 DWORD value_type;
 
+                const int key_len = strlen(ach_key);
+                char* key_memory  = _ALLOC_STR(key_len + 1);
+                memcpy(key_memory, ach_key, key_len);
+                key_memory[key_len] = '\0';
+
+                library_entry entry = {.name = key_memory, NULL};
+
                 LSTATUS status =
                   RegQueryValueExA(h_subkey, "ContentDir", NULL, &value_type, (LPBYTE)content_path, &buffer_size);
 
                 if (status == ERROR_SUCCESS && value_type == REG_SZ) {
-                    const int key_len         = strlen(ach_key);
                     const int content_dir_len = strlen(content_path);
 
                     // Move key and content_dir strings to arena so the original memory can be freed
-                    char* key_memory         = _ALLOC_STR(key_len + 1);
                     char* content_dir_memory = _ALLOC_STR(content_dir_len + 1);
-
-                    memcpy(key_memory, ach_key, key_len);
-                    key_memory[key_len] = '\0';
                     memcpy(content_dir_memory, content_path, content_dir_len);
                     content_dir_memory[content_dir_len] = '\0';
 
-                    // Get ContentDir and push to LIBRARIES array
-                    library_entry entry = {
-                      .name        = key_memory,
-                      .content_dir = content_dir_memory,
-                    };
+                    entry.content_dir = content_dir_memory;
 
                     memcpy(&LIBRARIES[LIB_COUNT], &entry, sizeof(entry));
                     SendMessage(H_LISTBOX, LB_INSERTSTRING, LIB_COUNT, (LPARAM)LIBRARIES[LIB_COUNT].name);
+
+                    _INFO("Found library entry: '%s (%s)'",
+                          LIBRARIES[LIB_COUNT].name,
+                          LIBRARIES[LIB_COUNT].content_dir);
+
                     LIB_COUNT++;
                 } else if (status == ERROR_MORE_DATA) {
                     // TODO: Handle cases where the path length > MAX_PATH
@@ -591,12 +598,17 @@ BOOL query_libraries(HWND hwnd) {
                     RegCloseKey(h_key);
                     return FALSE;
                 } else {
-                    _ERROR("Failed to retrieve ContentDir value for registry key: 'HKEY_LOCAL_MACHINE\\%s\\%s'",
-                           base_path,
-                           ach_key);
-                    RegCloseKey(h_subkey);
-                    RegCloseKey(h_key);
-                    return FALSE;
+                    _WARN("Failed to retrieve ContentDir value for registry key: 'HKEY_LOCAL_MACHINE\\%s\\%s'",
+                          base_path,
+                          ach_key);
+                    memcpy(&LIBRARIES[LIB_COUNT], &entry, sizeof(entry));
+                    SendMessage(H_LISTBOX, LB_INSERTSTRING, LIB_COUNT, (LPARAM)LIBRARIES[LIB_COUNT].name);
+
+                    _INFO("Found library entry: '%s (%s)'",
+                          LIBRARIES[LIB_COUNT].name,
+                          LIBRARIES[LIB_COUNT].content_dir);
+
+                    LIB_COUNT++;
                 }
 
                 RegCloseKey(h_subkey);
@@ -794,7 +806,7 @@ BOOL remove_library(const library_entry* library, BOOL remove_content) {
     if (!result)
         return FALSE;
 
-    if (remove_content && directory_exists(library->content_dir)) {
+    if (remove_content && library->content_dir != NULL && directory_exists(library->content_dir)) {
         result = rm_rf(library->content_dir);
         if (!result)
             return FALSE;
@@ -974,7 +986,7 @@ cleanup:
     return latest_version;
 }
 
-void check_for_updates(HWND hwnd) {
+void check_for_updates(HWND hwnd, BOOL alert_up_to_date) {
     char* current_version = get_latest_version();
     int compare           = compare_versions(current_version, VER_PRODUCTVERSION_STR);
 
@@ -1005,7 +1017,8 @@ void check_for_updates(HWND hwnd) {
                    "Update Check",
                    MB_OK | MB_ICONWARNING);
     } else {
-        MessageBox(hwnd, "You're running the latest version!", "Up to Date", MB_OK | MB_ICONINFORMATION);
+        if (alert_up_to_date)
+            MessageBox(hwnd, "You're running the latest version!", "Up to Date", MB_OK | MB_ICONINFORMATION);
     }
 }
 
@@ -1416,6 +1429,18 @@ LRESULT on_create(HWND hwnd) {
 
     SetMenu(hwnd, h_menubar);
 
+    H_SELECT_LIB_LABEL = CreateWindow("STATIC",
+                                      "Select a library to remove:",
+                                      WS_CHILD | WS_VISIBLE | SS_LEFT,
+                                      10,
+                                      10,
+                                      265,
+                                      20,
+                                      hwnd,
+                                      NULL,
+                                      GetModuleHandle(NULL),
+                                      NULL);
+
     H_LISTBOX = CreateWindowEx(WS_EX_CLIENTEDGE,
                                "LISTBOX",
                                NULL,
@@ -1496,6 +1521,7 @@ LRESULT on_create(HWND hwnd) {
                               DEFAULT_PITCH | FF_DONTCARE,
                               "Segoe UI");
 
+    SendMessage(H_SELECT_LIB_LABEL, WM_SETFONT, (WPARAM)h_font, TRUE);
     SendMessage(H_LISTBOX, WM_SETFONT, (WPARAM)h_font, TRUE);
     SendMessage(H_REMOVE_ALL_BUTTON, WM_SETFONT, (WPARAM)h_font, TRUE);
     SendMessage(H_REMOVE_BUTTON, WM_SETFONT, (WPARAM)h_font, TRUE);
@@ -1505,6 +1531,12 @@ LRESULT on_create(HWND hwnd) {
 
     SendMessage(H_REMOVE_LIB_FOLDER_CHECKBOX, WM_SETFONT, (WPARAM)h_font, TRUE);
     SendMessage(H_REMOVE_LIB_FOLDER_CHECKBOX, BM_SETCHECK, (WPARAM)TRUE, TRUE);
+
+    return 0;
+}
+
+LRESULT on_show(HWND hwnd) {
+    check_for_updates(hwnd, FALSE);
 
     // Search registry for key entries in `HKEY_LOCAL_MACHINE/SOFTWARE/Native Instruments/..`
     BOOL query_result = query_libraries(hwnd);
@@ -1517,27 +1549,6 @@ LRESULT on_create(HWND hwnd) {
         PostQuitMessage(0);
     }
 
-    char label_text[256] = {'\0'};
-    snprintf(label_text, 256, "Select a library to remove (found %d):", LIB_COUNT);
-
-    HWND h_label = CreateWindow("STATIC",
-                                label_text,
-                                WS_CHILD | WS_VISIBLE | SS_LEFT,
-                                10,
-                                10,
-                                265,
-                                20,
-                                hwnd,
-                                NULL,
-                                GetModuleHandle(NULL),
-                                NULL);
-    SendMessage(h_label, WM_SETFONT, (WPARAM)h_font, TRUE);
-
-    return 0;
-}
-
-LRESULT on_show(HWND hwnd) {
-    check_for_updates(hwnd);
     return 0;
 }
 
@@ -1783,7 +1794,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM lparam) {
                 }
 
                 case ID_HELP_CHECK_UPDATES: {
-                    check_for_updates(hwnd);
+                    check_for_updates(hwnd, TRUE);
                     break;
                 }
 
@@ -1828,6 +1839,8 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM lparam) {
 //====================================================================//
 
 int WINAPI WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_cmd_line, int n_cmd_show) {
+    log_init("K8-LRT.log");
+
 #ifndef NDEBUG
     attach_console();
 #endif
@@ -1874,7 +1887,6 @@ int WINAPI WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_cmd
     }
 
     ShowWindow(hwnd, n_cmd_show);
-    log_init(hwnd, "K8-LRT.log");
 
     MSG msg = {0};
     while (GetMessage(&msg, NULL, 0, 0)) {
