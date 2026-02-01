@@ -18,17 +18,26 @@ Locations that need to be searched and deleted:
 
 ## Quickstart
 
-The latest version of K8-LRT is v1.1.0 - you can [download it here](https://github.com/jakerieger/K8-LRT/releases/latest).
+The latest version of K8-LRT is v2.0.0 - you can [download it here](https://github.com/jakerieger/K8-LRT/releases/latest).
 
 Check out the [Quickstart](docs/QUICKSTART.md) guide for info on how to use K8-LRT.
 
 ## Changelog
 
-### 1.2.0 (TBD)
+### 2.0.0 (January 31, 2026)
 
-K8-LRT v1.2.0 brings a lot of bug fixes and reworks a large portion of the code base to improve both reliability but also maintainability.
+The 2.0 release of K8-LRT brings a lot of bug fixes and reworks a large portion of the code base to improve both reliability and maintainability.
 
 #### Added
+- String pools for more robust memory management
+- The ability to relocate libraries
+- Full NTFS-length path support
+
+#### Fixed
+- Crashing if an incorrect value for 'ContentDir' is found in the registry. Now it should simply ignore the content directory when removing the library (and disallow relocating since it doesn't have a location on disk).
+
+#### Removed
+- Support for Windows 7
 
 ### 1.1.0 (January 26, 2026)
 

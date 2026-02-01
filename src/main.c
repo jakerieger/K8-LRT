@@ -32,7 +32,9 @@
 
     REVISION HISTORY
 
-        1.2.0  (TBD)         bug fixes for registry querying
+        2.0.0  (2026-01-31)  bug fixes for registry querying, relocating libraries,
+                             removed support for Windows 7, string pool
+                             memory management, wide path support
         1.1.0  (2026-01-26)  additional directory checks and removals, UI additions and changes
         1.0.0  (2026-01-25)  UI redux, added functionality, updates
         0.3.1  (2026-01-23)  memory model improvements
@@ -47,12 +49,15 @@
 #include <stdarg.h>
 #include <windows.h>   // Core Windows API
 #include <winerror.h>  // Windows error API
+#include <winnt.h>     // Additional core API stuff
 #include <winreg.h>    // Registry API
 #include <Shlwapi.h>   // Shell API
 #include <shlobj.h>    // More Shell API
 #include <winuser.h>   // Dialogs and display
 #include <CommCtrl.h>  // For modern Windows styling (Common Controls)
 #include <winhttp.h>   // For checking for updates
+#include <pathcch.h>   // For long path support and newer file API (Windows 8+)
+#include <strsafe.h>   // Window API safer string handling
 
 //====================================================================//
 //                          -- LOGGING --                             //
@@ -96,39 +101,40 @@ void log_msg(log_level level, const char* fmt, ...) {
             break;
     }
 
-    fprintf(LOG_FILE,
-            "[%04d-%02d-%02d %02d:%02d:%02d.%03d] [%s] ",
-            st.wYear,
-            st.wMonth,
-            st.wDay,
-            st.wHour,
-            st.wMinute,
-            st.wSecond,
-            st.wMilliseconds,
-            level_str);
-
     va_list args;
     va_start(args, fmt);
-    vfprintf(LOG_FILE, fmt, args);
-#ifndef NDEBUG
-    if (ATTACHED_TO_CONSOLE) {
-        printf("[%04d-%02d-%02d %02d:%02d:%02d.%03d] [%s] ",
-               st.wYear,
-               st.wMonth,
-               st.wDay,
-               st.wHour,
-               st.wMinute,
-               st.wSecond,
-               st.wMilliseconds,
-               level_str);
-        vprintf(fmt, args);
-        printf("\n");
-    }
-#endif
+    char body[1024] = {0};
+    vsnprintf(body, 1024, fmt, args);
     va_end(args);
 
-    fprintf(LOG_FILE, "\n");
+    char msg[2048] = {0};
+    snprintf(msg,
+             2048,
+             "[%04d-%02d-%02d %02d:%02d:%02d.%03d] [%s] %s\n",
+             st.wYear,
+             st.wMonth,
+             st.wDay,
+             st.wHour,
+             st.wMinute,
+             st.wSecond,
+             st.wMilliseconds,
+             level_str,
+             body);
+
+    fprintf(LOG_FILE, "%s", msg);
     fflush(LOG_FILE);
+
+    if (level == LOG_FATAL) {
+        char msgbox_msg[2048] = {0};
+        snprintf(msgbox_msg, 2048, "A fatal error has occured and K8-LRT must shutdown:\n\n%s", body);
+        MessageBoxA(NULL, msgbox_msg, "Fatal Error", MB_OK | MB_ICONERROR);
+    }
+
+#ifndef NDEBUG
+    if (ATTACHED_TO_CONSOLE) {
+        printf("%s", msg);
+    }
+#endif
 }
 
 void log_init(const char* filename) {
@@ -168,7 +174,7 @@ void log_close(void) {
 #define _KB(n) ((UINT64)(n) << 10)
 #define _MB(n) ((UINT64)(n) << 20)
 #define _GB(n) ((UINT64)(n) << 30)
-#define _PROGRAM_MEMORY (_KB(128))  // Define how much memory to give K8-LRT (128 kilobytes)
+#define _PROGRAM_MEMORY (_MB(4))  // Define how much memory to give K8-LRT (4 megabytes)
 
 typedef struct {
     UINT64 capacity;
@@ -227,6 +233,205 @@ void arena_clear(void) {
 #define _ALLOC_STR(length) (char*)arena_push(sizeof(char) * (length), FALSE)
 #define _ALLOC(type) (type*)arena_push(sizeof(type), FALSE)
 
+#define INITIAL_STRPOOL_CAPACITY 16
+
+typedef struct {
+    char** strings;
+    size_t count;
+    size_t capacity;
+
+    wchar_t** wide_strings;
+    size_t wide_count;
+    size_t wide_capacity;
+} strpool;
+
+// Global string pool instance
+static strpool STRPOOL;
+
+void strpool_init(void) {
+    STRPOOL.strings = malloc(INITIAL_STRPOOL_CAPACITY * sizeof(char*));
+    if (!STRPOOL.strings)
+        _FATAL("Failed to allocate memory for string pool");
+    STRPOOL.count    = 0;
+    STRPOOL.capacity = INITIAL_STRPOOL_CAPACITY;
+
+    STRPOOL.wide_strings = malloc(INITIAL_STRPOOL_CAPACITY * sizeof(wchar_t*));
+    if (!STRPOOL.wide_strings)
+        _FATAL("Failed to allocate memory for string pool");
+    STRPOOL.wide_count    = 0;
+    STRPOOL.wide_capacity = INITIAL_STRPOOL_CAPACITY;
+}
+
+char* strpool_strdup(const char* str) {
+    if (!str)
+        return NULL;
+
+    char* copy = _strdup(str);
+    if (!copy)
+        return NULL;
+
+    if (STRPOOL.count >= STRPOOL.capacity) {
+        size_t new_cap  = STRPOOL.capacity * 2;
+        char** new_strs = realloc(STRPOOL.strings, new_cap * sizeof(char*));
+        if (!new_strs) {
+            free(copy);
+            return NULL;
+        }
+        STRPOOL.strings  = new_strs;
+        STRPOOL.capacity = new_cap;
+    }
+
+    STRPOOL.strings[STRPOOL.count++] = copy;
+    return copy;
+}
+
+wchar_t* strpool_wstrdup(const wchar_t* str) {
+    if (!str)
+        return NULL;
+
+    wchar_t* copy = _wcsdup(str);
+    if (!copy)
+        return NULL;
+
+    if (STRPOOL.wide_count >= STRPOOL.wide_capacity) {
+        size_t new_cap     = STRPOOL.wide_capacity * 2;
+        wchar_t** new_strs = realloc(STRPOOL.wide_strings, new_cap * sizeof(wchar_t*));
+        if (!new_strs) {
+            free(copy);
+            return NULL;
+        }
+        STRPOOL.wide_strings  = new_strs;
+        STRPOOL.wide_capacity = new_cap;
+    }
+
+    STRPOOL.wide_strings[STRPOOL.wide_count++] = copy;
+    return copy;
+}
+
+char* strpool_sprintf(const char* fmt, ...) {
+    va_list args, args_copy;
+    va_start(args, fmt);
+    va_copy(args_copy, args);
+
+    int size = vsnprintf(NULL, 0, fmt, args);
+    va_end(args);
+
+    if (size < 0) {
+        va_end(args_copy);
+        return NULL;
+    }
+
+    char* str = malloc(size + 1);
+    if (!str) {
+        va_end(args_copy);
+        return NULL;
+    }
+
+    vsnprintf(str, size + 1, fmt, args_copy);
+    va_end(args_copy);
+
+    if (STRPOOL.count >= STRPOOL.capacity) {
+        size_t new_capacity = STRPOOL.capacity * 2;
+        char** new_strings  = realloc(STRPOOL.strings, new_capacity * sizeof(char*));
+        if (!new_strings) {
+            free(str);
+            return NULL;
+        }
+        STRPOOL.strings  = new_strings;
+        STRPOOL.capacity = new_capacity;
+    }
+
+    STRPOOL.strings[STRPOOL.count++] = str;
+    return str;
+}
+
+wchar_t* strpool_wsprintf(const wchar_t* fmt, ...) {
+    va_list args, args_copy;
+    va_start(args, fmt);
+    va_copy(args_copy, args);
+
+    int size = _vscwprintf(fmt, args);
+    va_end(args);
+
+    if (size < 0) {
+        va_end(args_copy);
+        return NULL;
+    }
+
+    wchar_t* str = malloc((size + 1) * sizeof(wchar_t));
+    if (!str) {
+        va_end(args_copy);
+        return NULL;
+    }
+
+    vswprintf(str, size + 1, fmt, args_copy);
+    va_end(args_copy);
+
+    if (STRPOOL.wide_count >= STRPOOL.wide_capacity) {
+        size_t new_capacity   = STRPOOL.wide_capacity * 2;
+        wchar_t** new_strings = realloc(STRPOOL.wide_strings, new_capacity * sizeof(wchar_t*));
+        if (!new_strings) {
+            free(str);
+            return NULL;
+        }
+        STRPOOL.wide_strings  = new_strings;
+        STRPOOL.wide_capacity = new_capacity;
+    }
+
+    STRPOOL.wide_strings[STRPOOL.wide_count++] = str;
+    return str;
+}
+
+char* strpool_alloc(size_t count) {
+    char* buffer = malloc(count);
+    if (!buffer)
+        return NULL;
+
+    if (STRPOOL.count >= STRPOOL.capacity) {
+        size_t new_capacity = STRPOOL.capacity * 2;
+        char** new_strings  = realloc(STRPOOL.strings, new_capacity * sizeof(char*));
+        if (!new_strings) {
+            free(buffer);
+            return NULL;
+        }
+        STRPOOL.strings  = new_strings;
+        STRPOOL.capacity = new_capacity;
+    }
+
+    STRPOOL.strings[STRPOOL.count++] = buffer;
+    return buffer;
+}
+
+wchar_t* strpool_walloc(size_t count) {
+    wchar_t* buffer = malloc(count * sizeof(wchar_t));
+    if (!buffer)
+        return NULL;
+
+    if (STRPOOL.wide_count >= STRPOOL.wide_capacity) {
+        size_t new_capacity   = STRPOOL.wide_capacity * 2;
+        wchar_t** new_strings = realloc(STRPOOL.wide_strings, new_capacity * sizeof(wchar_t*));
+        if (!new_strings) {
+            free(buffer);
+            return NULL;
+        }
+        STRPOOL.wide_strings  = new_strings;
+        STRPOOL.wide_capacity = new_capacity;
+    }
+
+    STRPOOL.wide_strings[STRPOOL.wide_count++] = buffer;
+    return buffer;
+}
+
+void strpool_destroy(void) {
+    for (size_t i = 0; i < STRPOOL.count; i++)
+        free(STRPOOL.strings[i]);
+    free(STRPOOL.strings);
+
+    for (size_t i = 0; i < STRPOOL.wide_count; i++)
+        free(STRPOOL.wide_strings[i]);
+    free(STRPOOL.wide_strings);
+}
+
 //====================================================================//
 //                   -- UI ELEMENT DEFINITIONS --                     //
 //====================================================================//
@@ -249,7 +454,7 @@ static HFONT UI_FONT = NULL;
 //====================================================================//
 
 #define _WINDOW_W 300
-#define _WINDOW_H 436
+#define _WINDOW_H 440
 #define _WINDOW_CLASS "K8LRT_WindowClass\0"
 #define _WINDOW_TITLE "K8-LRT - v" VER_PRODUCTVERSION_STR
 
@@ -262,6 +467,7 @@ static HFONT UI_FONT = NULL;
 #define _IS_CHECKED(checkbox) (IsDlgButtonChecked(hwnd, checkbox) == BST_CHECKED)
 #define _MAX_LIB_COUNT 512
 #define _MAX_KEY_LENGTH 255
+#define _MAX_PATH_NFTS 32768
 
 #define _LIB_CACHE_ROOT "Native Instruments\\Kontakt 8\\LibrariesCache\0"
 #define _DB3_ROOT "Native Instruments\\Kontakt 8\\komplete.db3\0"
@@ -283,6 +489,11 @@ typedef struct {
     BOOL remove_library_folder;
     int selected_count;
 } batch_removal_dialog_data;
+
+typedef struct {
+    library_entry* library;
+    char new_path[MAX_PATH];
+} relocate_lib_dialog_data;
 
 struct library_entry {
     // Library name in registry (this is always the general name used throughout NI's systems)
@@ -379,51 +590,97 @@ static char* KEY_EXCLUSION_PATTERNS[KEY_EXCLUSION_PATTERNS_SIZE] = {
     #define _NOT_IMPLEMENTED()
 #endif
 
+wchar_t* make_long_path(const char* path) {
+    if (!path)
+        return NULL;
+
+    int needed = MultiByteToWideChar(CP_UTF8, 0, path, -1, NULL, 0);
+    if (needed == 0)
+        return NULL;
+
+    // Allocate buffer: "\\?\" + path + null
+    size_t buffer_size = needed + 10;  // Extra space for prefix and safety
+    wchar_t* temp      = (wchar_t*)malloc(sizeof(wchar_t) * buffer_size);
+    if (!temp)
+        return NULL;
+
+    MultiByteToWideChar(CP_UTF8, 0, path, -1, temp, needed);
+
+    // Check if already has \\?\ prefix
+    if (wcsncmp(temp, L"\\\\?\\", 4) == 0) {
+        return temp;
+    }
+
+    // Check if it's a UNC path (\\server\share)
+    if (wcsncmp(temp, L"\\\\", 2) == 0) {
+        // UNC path: convert to \\?\UNC\server\share
+        wchar_t* result = strpool_walloc(buffer_size + 10);
+        if (!result) {
+            free(temp);
+            return NULL;
+        }
+        StringCchPrintfW(result, buffer_size + 10, L"\\\\?\\UNC\\%s", temp + 2);
+        free(temp);
+        return result;
+    }
+
+    // Regular path: add \\?\ prefix
+    wchar_t* result = strpool_walloc(buffer_size);
+    if (!result) {
+        free(temp);
+        return NULL;
+    }
+    StringCchPrintfW(result, buffer_size, L"\\\\?\\%s", temp);
+    free(temp);
+    return result;
+}
+
+char* join_str(const char* prefix, const char* suffix) {
+    return strpool_sprintf("%s%s", prefix, suffix);
+}
+
+char* join_paths(const char* base, const char* tail) {
+    return strpool_sprintf("%s\\%s", base, tail);
+}
+
+wchar_t* join_paths_wide(const wchar_t* base, const wchar_t* tail) {
+    if (!base || !tail)
+        return NULL;
+
+    size_t base_len   = wcslen(base);
+    size_t append_len = wcslen(tail);
+    size_t total      = base_len + append_len + 2;  // +1 for backslash, +1 for null
+
+    wchar_t* result = strpool_walloc(total);
+    if (!result)
+        return NULL;
+
+    wcscpy_s(result, total, base);
+
+    // Add backslash if needed
+    if (base_len > 0 && result[base_len - 1] != L'\\') {
+        wcscat_s(result, total, L"\\");
+    }
+
+    wcscat_s(result, total, tail);
+    return result;
+}
+
 char* get_local_appdata_path(void) {
     PWSTR psz_path = NULL;
 
     HRESULT hr = SHGetKnownFolderPath(&FOLDERID_LocalAppData, 0, NULL, &psz_path);
     if (SUCCEEDED(hr)) {
-        // convert to ansi
         char path[MAX_PATH];
         WideCharToMultiByte(CP_ACP, 0, psz_path, -1, path, MAX_PATH, NULL, NULL);
         CoTaskMemFree(psz_path);
 
-        char* path_mem = _ALLOC_STR(strlen(path) + 1);
-        memcpy(path_mem, path, strlen(path));
-        path_mem[strlen(path)] = '\0';
-
-        return path_mem;
+        return strpool_strdup(path);
     } else {
         _ERROR("Failed to retrieve path. Error code: 0x%08X\n", (UINT)hr);
     }
 
     return NULL;
-}
-
-char* join_str(const char* prefix, const char* suffix) {
-    const size_t prefix_len = strlen(prefix);
-    const size_t suffix_len = strlen(suffix);
-    const size_t needed     = prefix_len + suffix_len + 1;
-
-    char* buffer = _ALLOC_STR(needed);
-    int offset   = 0;
-
-    memcpy(buffer, prefix, prefix_len);
-    offset += prefix_len;
-
-    memcpy(buffer + offset, suffix, suffix_len);
-    offset += suffix_len;
-
-    buffer[offset] = '\0';
-
-    return buffer;
-}
-
-char* join_paths(const char* path_prefix, const char* path_suffix) {
-    char* prefix = join_str(path_prefix, "\\");
-    char* full   = join_str(prefix, path_suffix);
-    return full;
 }
 
 void attach_console() {
@@ -458,27 +715,135 @@ BOOL has_extension(const char* filename, const char* ext) {
     return FALSE;
 }
 
-BOOL rm_rf(const char* directory) {
-    if (directory == NULL)
+BOOL rm_rf_recursive(const wchar_t* path) {
+    wchar_t* search_path = join_paths_wide(path, L"*");
+    if (!search_path)
         return FALSE;
 
-    SHFILEOPSTRUCTA file_op = {
-      .hwnd                  = NULL,
-      .wFunc                 = FO_DELETE,
-      .pFrom                 = directory,
-      .pTo                   = NULL,
-      .fFlags                = FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT,
-      .fAnyOperationsAborted = FALSE,
-      .hNameMappings         = NULL,
-      .lpszProgressTitle     = NULL,
-    };
+    WIN32_FIND_DATAW find_data;
+    HANDLE hFind = FindFirstFileW(search_path, &find_data);
 
-    // SHFileOperation expects a double-null terminated string
-    char path_buffer[MAX_PATH + 1] = {0};
-    strncpy_s(path_buffer, strlen(directory), directory, MAX_PATH);
+    if (hFind == INVALID_HANDLE_VALUE) {
+        return FALSE;
+    }
 
-    file_op.pFrom = path_buffer;
-    return SHFileOperationA(&file_op) == 0;
+    BOOL success = TRUE;
+    do {
+        if (wcscmp(find_data.cFileName, L".") == 0 || wcscmp(find_data.cFileName, L"..") == 0) {
+            continue;
+        }
+
+        wchar_t* full_path = join_paths_wide(path, find_data.cFileName);
+        if (!full_path) {
+            success = FALSE;
+            break;
+        }
+
+        if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            if (!rm_rf_recursive(full_path)) {
+                success = FALSE;
+            }
+        } else {
+            SetFileAttributesW(full_path, FILE_ATTRIBUTE_NORMAL);
+            if (!DeleteFileW(full_path)) {
+                _ERROR("Failed to delete file: %ls (Error: %lu)", full_path, GetLastError());
+                success = FALSE;
+            }
+        }
+
+        if (!success)
+            break;
+
+    } while (FindNextFileW(hFind, &find_data));
+
+    FindClose(hFind);
+
+    if (success) {
+        if (!RemoveDirectoryW(path)) {
+            _ERROR("Failed to remove directory: %ls (Error: %lu)", path, GetLastError());
+            success = FALSE;
+        }
+    }
+
+    return success;
+}
+
+BOOL rm_rf(const wchar_t* directory) {
+    if (!directory)
+        return FALSE;
+    BOOL result = rm_rf_recursive(directory);
+    return result;
+}
+
+BOOL copy_directory_recursive(const wchar_t* src, const wchar_t* dst) {
+    if (!CreateDirectoryW(dst, NULL)) {
+        if (GetLastError() != ERROR_ALREADY_EXISTS) {
+            _ERROR("Failed to create directory: %ls (Error: %lu)", dst, GetLastError());
+            return FALSE;
+        }
+    }
+
+    wchar_t* search_path = join_paths_wide(src, L"*");
+    if (!search_path)
+        return FALSE;
+
+    WIN32_FIND_DATAW find_data;
+    HANDLE hFind = FindFirstFileW(search_path, &find_data);
+
+    if (hFind == INVALID_HANDLE_VALUE) {
+        _ERROR("FindFirstFileW failed for: %ls (Error: %lu)", src, GetLastError());
+        return FALSE;
+    }
+
+    BOOL success = TRUE;
+    do {
+        // Skip . and ..
+        if (wcscmp(find_data.cFileName, L".") == 0 || wcscmp(find_data.cFileName, L"..") == 0) {
+            continue;
+        }
+
+        wchar_t* src_path = join_paths_wide(src, find_data.cFileName);
+        wchar_t* dst_path = join_paths_wide(dst, find_data.cFileName);
+
+        if (!src_path || !dst_path) {
+            success = FALSE;
+            break;
+        }
+
+        if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            if (!copy_directory_recursive(src_path, dst_path)) {
+                _ERROR("Failed to copy subdirectory: %ls", src_path);
+                success = FALSE;
+            }
+        } else {
+            COPYFILE2_EXTENDED_PARAMETERS params = {0};
+            params.dwSize                        = sizeof(params);
+            params.dwCopyFlags                   = COPY_FILE_NO_BUFFERING;
+
+            HRESULT hr = CopyFile2(src_path, dst_path, &params);
+            if (FAILED(hr)) {
+                _ERROR("Failed to copy file: %ls to %ls (HRESULT: 0x%08X)", src_path, dst_path, hr);
+                success = FALSE;
+            }
+        }
+
+        if (!success)
+            break;
+
+    } while (FindNextFileW(hFind, &find_data));
+
+    FindClose(hFind);
+    return success;
+}
+
+BOOL copy_directory(const char* src, const char* dst) {
+    wchar_t* src_w = make_long_path(src);
+    wchar_t* dst_w = make_long_path(dst);
+    if (!src_w || !dst_w)
+        return FALSE;
+
+    BOOL result = copy_directory_recursive(src_w, dst_w);
+    return result;
 }
 
 BOOL list_contains(char* haystack[], const int haystack_size, const char* needle) {
@@ -554,6 +919,13 @@ void close_registry_key(HKEY* key) {
     RegCloseKey(*key);
 }
 
+BOOL delete_regisry_key(HKEY base_key, const char* key) {
+    LONG result = RegDeleteKeyA(base_key, key);
+    if (result != ERROR_SUCCESS) {}
+
+    return TRUE;
+}
+
 int enumerate_registry_keys(HKEY key, char* keys[]) {
     char current_key[_MAX_KEY_LENGTH];
     DWORD buffer_size = sizeof(current_key);
@@ -562,14 +934,8 @@ int enumerate_registry_keys(HKEY key, char* keys[]) {
 
     while (RegEnumKeyExA(key, index, current_key, &buffer_size, NULL, NULL, NULL, &ft_last) == ERROR_SUCCESS) {
         _INFO("Found registry entry: '%s'", current_key);
-        const size_t key_len = strlen(current_key);
-        char* key_memory     = _ALLOC_STR(key_len + 1);
-        memcpy(key_memory, current_key, key_len);
-        key_memory[key_len] = '\0';
-        keys[index]         = key_memory;
-
-        buffer_size = sizeof(current_key);
-        index++;
+        buffer_size   = sizeof(current_key);
+        keys[index++] = strpool_strdup(current_key);
     }
 
     return index;
@@ -582,15 +948,15 @@ const char* get_registry_value_str(HKEY key, const char* value_name) {
 
     LSTATUS status = RegQueryValueExA(key, value_name, NULL, &value_type, (LPBYTE)value, &buffer_size);
     if (status == ERROR_SUCCESS && value_type == REG_SZ) {
-        const size_t value_len = strlen(value);
-        char* value_memory     = _ALLOC_STR(value_len + 1);
-        memcpy(value_memory, value, value_len);
-        value_memory[value_len] = '\0';
-
-        return value_memory;
+        return strpool_strdup(value);
     }
 
     return NULL;
+}
+
+BOOL set_registry_value_str(HKEY key, const char* value_name, const char* new_value) {
+    LSTATUS status = RegSetValueExA(key, value_name, 0, REG_SZ, (const BYTE*)new_value, (DWORD)(strlen(new_value) + 1));
+    return (status == ERROR_SUCCESS);
 }
 
 BOOL query_libraries(HWND hwnd) {
@@ -602,8 +968,8 @@ BOOL query_libraries(HWND hwnd) {
     if (!result)
         return FALSE;
 
-    char** keys   = _ALLOC_ARRAY(char*, _MAX_LIB_COUNT);
-    int key_count = enumerate_registry_keys(base_key, keys);
+    char* keys[_MAX_LIB_COUNT] = {0};
+    int key_count              = enumerate_registry_keys(base_key, keys);
 
     close_registry_key(&base_key);
 
@@ -652,9 +1018,10 @@ BOOL query_libraries(HWND hwnd) {
     if (INITIAL_SEARCH) {
         INITIAL_SEARCH = FALSE;
     } else {
-        char msg[256] = {'\0'};
-        snprintf(msg, 256, "Found %d installed libraries", LIB_COUNT);
-        MessageBox(hwnd, msg, "K8-LRT", MB_OK | MB_ICONINFORMATION);
+        MessageBox(hwnd,
+                   strpool_sprintf("Found %d installed libraries", LIB_COUNT),
+                   "K8-LRT",
+                   MB_OK | MB_ICONINFORMATION);
     }
 
     return TRUE;
@@ -698,12 +1065,12 @@ BOOL remove_registry_keys(const char* key) {
 }
 
 BOOL remove_xml_file(const char* name) {
-    char* prefix   = join_paths("C:\\Program Files\\Common Files\\Native Instruments\\Service Center", name);
-    char* filename = join_str(prefix, ".xml");
+    char* filename =
+      strpool_sprintf("C:\\Program Files\\Common Files\\Native Instruments\\Service Center\\%s.xml", name);
 
     if (file_exists(filename)) {
         if (BACKUP_FILES) {
-            char* bak_filename = join_str(prefix, ".xml.bak");
+            char* bak_filename = strpool_sprintf("%s.bak", filename);
             if (!CopyFileExA(filename, bak_filename, NULL, NULL, NULL, 0)) {
                 _ERROR("Failed to backup XML file: '%s'", filename);
                 return FALSE;
@@ -833,7 +1200,7 @@ BOOL remove_library(const library_entry* library, BOOL remove_content) {
         return FALSE;
 
     if (remove_content && library->content_dir != NULL && directory_exists(library->content_dir)) {
-        result = rm_rf(library->content_dir);
+        result = rm_rf(make_long_path(library->content_dir));
         if (!result)
             return FALSE;
     }
@@ -870,7 +1237,7 @@ char* extract_tag_name(const char* json) {
         return NULL;
 
     size_t len = value_end - value_start;
-    char* tag  = _ALLOC_STR(len + 1);
+    char* tag  = strpool_alloc(len + 1);
     strncpy_s(tag, len + 1, value_start, len);
     tag[len] = '\0';
 
@@ -1017,15 +1384,12 @@ void check_for_updates(HWND hwnd, BOOL alert_up_to_date) {
     int compare           = compare_versions(current_version, VER_PRODUCTVERSION_STR);
 
     if (compare > 0) {
-        char message[512];
-        sprintf_s(message,
-                  512,
-                  "A new version of K8-LRT is available!\n\n"
-                  "Current: %s\n"
-                  "Latest: %s\n\n"
-                  "Visit the GitHub releases page to download?",
-                  VER_PRODUCTVERSION_STR,
-                  current_version + 1);
+        char* message = strpool_sprintf("A new version of K8-LRT is available!\n\n"
+                                        "Current: %s\n"
+                                        "Latest: %s\n\n"
+                                        "Visit the GitHub releases page to download?",
+                                        VER_PRODUCTVERSION_STR,
+                                        current_version + 1);
 
         int result = MessageBoxA(hwnd, message, "Update Available", MB_YESNO | MB_ICONINFORMATION);
 
@@ -1056,6 +1420,46 @@ void update_batch_count_label(HWND hwnd, int count) {
         sprintf_s(label_text, sizeof(label_text), "%d libraries selected", count);
     }
     SetDlgItemTextA(hwnd, IDC_BATCH_COUNT_LABEL, label_text);
+}
+
+BOOL open_folder_dialog(HWND owner, char* dst, int len) {
+    IFileOpenDialog* pFileOpen = NULL;
+    IShellItem* pItem          = NULL;
+    PWSTR pszFilePath          = NULL;
+    BOOL success               = FALSE;
+    HRESULT hr;
+
+    hr = CoCreateInstance(&CLSID_FileOpenDialog, NULL, CLSCTX_ALL, &IID_IFileOpenDialog, (void**)&pFileOpen);
+
+    if (SUCCEEDED(hr)) {
+        DWORD dwOptions;
+        hr = pFileOpen->lpVtbl->GetOptions(pFileOpen, &dwOptions);
+        if (SUCCEEDED(hr)) {
+            hr = pFileOpen->lpVtbl->SetOptions(pFileOpen, dwOptions | FOS_PICKFOLDERS);
+        }
+
+        if (SUCCEEDED(hr)) {
+            hr = pFileOpen->lpVtbl->Show(pFileOpen, owner);
+        }
+
+        if (SUCCEEDED(hr)) {
+            hr = pFileOpen->lpVtbl->GetResult(pFileOpen, &pItem);
+
+            if (SUCCEEDED(hr)) {
+                hr = pItem->lpVtbl->GetDisplayName(pItem, SIGDN_FILESYSPATH, &pszFilePath);
+
+                if (SUCCEEDED(hr)) {
+                    WideCharToMultiByte(CP_ACP, 0, pszFilePath, -1, dst, len, NULL, NULL);
+                    success = TRUE;
+                    CoTaskMemFree(pszFilePath);
+                }
+                pItem->lpVtbl->Release(pItem);
+            }
+        }
+        pFileOpen->lpVtbl->Release(pFileOpen);
+    }
+
+    return success;
 }
 
 //====================================================================//
@@ -1092,8 +1496,9 @@ void create_checkbox(HWND* checkbox,
     *checkbox = CreateWindowEx(0, "BUTTON", label, style, x, y, w, h, hwnd, (HMENU)menu, GetModuleHandle(NULL), NULL);
     SendMessage(*checkbox, WM_SETFONT, (WPARAM)UI_FONT, TRUE);
 
-    if (begin_checked)
-        SendMessage(*checkbox, BM_SETCHECK, (WPARAM)TRUE, TRUE);
+    if (begin_checked) {
+        SendMessage(*checkbox, BM_SETCHECK, (WPARAM)BST_CHECKED, 0);
+    }
 }
 
 void create_label(HWND* label, const char* text, int x, int y, int w, int h, HWND hwnd) {
@@ -1116,10 +1521,10 @@ void create_label(HWND* label, const char* text, int x, int y, int w, int h, HWN
 void create_listbox(HWND* listbox, int x, int y, int w, int h, HWND hwnd, int menu) {
     _ASSERT(listbox != NULL);
 
-    *listbox = CreateWindowEx(WS_EX_CLIENTEDGE,
+    *listbox = CreateWindowEx(0,
                               "LISTBOX",
                               NULL,
-                              WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY,
+                              WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_BORDER | LBS_NOTIFY,
                               x,
                               y,
                               w,
@@ -1129,6 +1534,16 @@ void create_listbox(HWND* listbox, int x, int y, int w, int h, HWND hwnd, int me
                               GetModuleHandle(NULL),
                               NULL);
     SendMessage(*listbox, WM_SETFONT, (WPARAM)UI_FONT, TRUE);
+}
+
+void create_edit(HWND* edit, int x, int y, int w, int h, HWND hwnd, int menu, BOOL multiline, BOOL readonly) {
+    DWORD style = WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL | ES_AUTOVSCROLL | ES_AUTOHSCROLL | WS_BORDER;
+    if (multiline)
+        style |= ES_MULTILINE;
+    if (readonly)
+        style |= ES_READONLY;
+
+    *edit = CreateWindowEx(0, "EDIT", NULL, style, x, y, w, h, hwnd, (HMENU)menu, GetModuleHandle(NULL), NULL);
 }
 
 void create_menu_bar(HWND hwnd) {
@@ -1155,19 +1570,8 @@ void create_menu_bar(HWND hwnd) {
 LRESULT CALLBACK log_viewer_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM lparam) {
     switch (umsg) {
         case WM_CREATE: {
-            HWND h_edit = CreateWindowEx(WS_EX_CLIENTEDGE,
-                                         "EDIT",
-                                         NULL,
-                                         WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL | ES_MULTILINE | ES_READONLY |
-                                           ES_AUTOVSCROLL | ES_AUTOHSCROLL,
-                                         0,
-                                         0,
-                                         0,
-                                         0,
-                                         hwnd,
-                                         (HMENU)IDC_LOGVIEW_EDIT,
-                                         GetModuleHandle(NULL),
-                                         NULL);
+            HWND h_edit;
+            create_edit(&h_edit, 0, 0, 0, 0, hwnd, IDC_LOGVIEW_EDIT, TRUE, TRUE);
 
             HFONT h_font = CreateFont(14,
                                       0,
@@ -1277,13 +1681,8 @@ INT_PTR CALLBACK about_dialog_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM l
         case WM_INITDIALOG: {
             char* latest_v = (char*)lparam;
             if (latest_v) {
-                char buffer[64] = {'\0'};
-                wsprintfA(buffer, "Version %s", latest_v);
-                SetDlgItemTextA(hwnd, IDC_VER_LABEL, buffer);
-
-                memset(buffer, 0, 64);
-                wsprintfA(buffer, "Build %d", VER_BUILD);
-                SetDlgItemTextA(hwnd, IDC_BUILD_LABEL, buffer);
+                SetDlgItemTextA(hwnd, IDC_VER_LABEL, strpool_sprintf("Version %s", latest_v));
+                SetDlgItemTextA(hwnd, IDC_BUILD_LABEL, strpool_sprintf("Build %d", VER_BUILD));
             }
 
             return (INT_PTR)TRUE;
@@ -1525,6 +1924,95 @@ INT_PTR CALLBACK batch_remove_dialog_proc(HWND hwnd, UINT umsg, WPARAM wparam, L
     return (INT_PTR)FALSE;
 }
 
+INT_PTR CALLBACK relocate_dialog_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM lparam) {
+    static relocate_lib_dialog_data* data = NULL;
+
+    switch (umsg) {
+        case WM_INITDIALOG: {
+            data = (relocate_lib_dialog_data*)lparam;
+
+            HWND h_name_label = GetDlgItem(hwnd, IDC_LIB_NAME_LABEL);
+            SetWindowTextA(h_name_label, data->library->name);
+
+            HFONT h_font = CreateFont(16,
+                                      0,
+                                      0,
+                                      0,
+                                      FW_BOLD,
+                                      FALSE,
+                                      FALSE,
+                                      FALSE,
+                                      DEFAULT_CHARSET,
+                                      OUT_DEFAULT_PRECIS,
+                                      CLIP_DEFAULT_PRECIS,
+                                      DEFAULT_QUALITY,
+                                      DEFAULT_PITCH | FF_DONTCARE,
+                                      "Segoe UI");
+            SendMessage(h_name_label, WM_SETFONT, (WPARAM)h_font, TRUE);
+
+            HWND h_content_dir_label = GetDlgItem(hwnd, IDC_CONTENT_DIR_LABEL);
+            SetWindowTextA(h_content_dir_label, data->library->content_dir);
+
+            RECT parent_rect, dlg_rect;
+            HWND h_parent = GetParent(hwnd);
+            GetWindowRect(h_parent, &parent_rect);
+            GetWindowRect(hwnd, &dlg_rect);
+
+            int dlg_w    = dlg_rect.right - dlg_rect.left;
+            int dlg_h    = dlg_rect.bottom - dlg_rect.top;
+            int parent_x = parent_rect.left;
+            int parent_y = parent_rect.top;
+            int parent_w = parent_rect.right - parent_rect.left;
+            int parent_h = parent_rect.bottom - parent_rect.top;
+
+            int x = parent_x + (parent_w - dlg_w) / 2;
+            int y = parent_y + (parent_h - dlg_h) / 2;
+
+            SetWindowPos(hwnd, NULL, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+
+            return (INT_PTR)TRUE;
+        }
+
+        case WM_COMMAND: {
+            switch (LOWORD(wparam)) {
+                case IDC_RELOCATE_BROWSE_BTN: {
+                    char selected_path[MAX_PATH] = {0};
+                    if (open_folder_dialog(hwnd, selected_path, MAX_PATH)) {
+                        SetDlgItemText(hwnd, IDC_RELOCATE_PATH_EDIT, selected_path);
+                    }
+                    return (INT_PTR)TRUE;
+                }
+
+                case IDRELOCATE_RELOCATE: {
+                    GetDlgItemText(hwnd, IDC_RELOCATE_PATH_EDIT, data->new_path, MAX_PATH);
+
+                    if (strlen(data->new_path) == 0) {
+                        MessageBox(hwnd, "Please select a destination folder.", "Error", MB_ICONWARNING);
+                        return (INT_PTR)TRUE;
+                    }
+
+                    EndDialog(hwnd, IDRELOCATE_RELOCATE);
+                    return (INT_PTR)TRUE;
+                }
+
+                case IDCANCEL_RELOCATE:
+                case IDCANCEL: {
+                    EndDialog(hwnd, IDCANCEL);
+                    return (INT_PTR)TRUE;
+                }
+            }
+            break;
+        }
+
+        case WM_CLOSE: {
+            EndDialog(hwnd, IDCANCEL);
+            return (INT_PTR)TRUE;
+        }
+    }
+
+    return (INT_PTR)FALSE;
+}
+
 //====================================================================//
 //                     -- WNDPROC CALLBACKS --                        //
 //====================================================================//
@@ -1574,9 +2062,9 @@ LRESULT on_create(HWND hwnd) {
                     TRUE,
                     FALSE);
 
-    create_button(&H_REMOVE_ALL_BUTTON, "Remove All...", 10, 306, 130, 30, hwnd, IDC_REMOVE_ALL_BUTTON, FALSE);
-    create_button(&H_REMOVE_BUTTON, "Remove Selected", 147, 306, 130, 30, hwnd, IDC_REMOVE_BUTTON, TRUE);
-    create_button(&H_RELOCATE_BUTTON, "Relocate Selected", 10, 340, 266, 26, hwnd, IDC_RELOCATE_BUTTON, TRUE);
+    create_button(&H_REMOVE_ALL_BUTTON, "Remove All...", 10, 312, 131, 30, hwnd, IDC_REMOVE_ALL_BUTTON, FALSE);
+    create_button(&H_REMOVE_BUTTON, "Remove Selected", 145, 312, 131, 30, hwnd, IDC_REMOVE_BUTTON, TRUE);
+    create_button(&H_RELOCATE_BUTTON, "Relocate Selected", 10, 346, 266, 26, hwnd, IDC_RELOCATE_BUTTON, TRUE);
 
     return 0;
 }
@@ -1696,17 +2184,18 @@ void on_remove_all(HWND hwnd) {
 
         BOOL query_result = query_libraries(hwnd);
 
-        char result_msg[256];
         if (failed_count == 0) {
-            sprintf_s(result_msg, sizeof(result_msg), "Successfully removed %d library(ies).", removed_count);
-            MessageBox(hwnd, result_msg, "Success", MB_OK | MB_ICONINFORMATION);
+            MessageBox(hwnd,
+                       strpool_sprintf("Successfully removed %d library(ies).", removed_count),
+                       "Success",
+                       MB_OK | MB_ICONINFORMATION);
         } else {
-            sprintf_s(result_msg,
-                      sizeof(result_msg),
-                      "Removed %d library(ies).\n%d failed.\n\nCheck K8-LRT.log for details.",
-                      removed_count,
-                      failed_count);
-            MessageBox(hwnd, result_msg, "Partial Success", MB_OK | MB_ICONWARNING);
+            MessageBox(hwnd,
+                       strpool_sprintf("Removed %d library(ies).\n%d failed.\n\nCheck K8-LRT.log for details.",
+                                       removed_count,
+                                       failed_count),
+                       "Partial Success",
+                       MB_OK | MB_ICONWARNING);
         }
 
         if (!query_result) {
@@ -1722,11 +2211,62 @@ void on_remove_all(HWND hwnd) {
 }
 
 void on_relocate_selected(HWND hwnd) {
-    const char* content_dir = LIBRARIES[SELECTED_INDEX].content_dir;
+    relocate_lib_dialog_data data = {.library = &LIBRARIES[SELECTED_INDEX]};
+    INT_PTR result                = DialogBoxParam(GetModuleHandle(NULL),
+                                    MAKEINTRESOURCE(IDD_RELOCATE_LIBRARYBOX),
+                                    hwnd,
+                                    relocate_dialog_proc,
+                                    (LPARAM)&data);
 
-    // 1. Copy library to new directory
-    // 2. Delete original library directory
-    // 3. Update registry key
+    if (result == IDRELOCATE_RELOCATE) {
+        _INFO("Relocating library '%s'", data.library->name);
+        _INFO("Old Path: %s", data.library->content_dir);
+        _INFO("New Path: %s", data.new_path);
+
+        const char* new_path_full = join_paths(data.new_path, data.library->name);
+
+        if (!copy_directory(data.library->content_dir, new_path_full)) {
+            char* msg = strpool_sprintf("Failed to copy content directory to new location: '%s'", new_path_full);
+            _ERROR(msg);
+            MessageBox(hwnd, msg, "Error relocating library", MB_OK | MB_ICONERROR);
+            return;
+        }
+
+        if (!rm_rf(make_long_path(data.library->content_dir))) {
+            _WARN(
+              "Library (%s) was copied to new location but K8-LRT was unable to delete the original library content "
+              "directory.",
+              data.library->name);
+        }
+
+        HKEY regkey;
+        const char* key_path = join_paths("SOFTWARE\\Native Instruments", data.library->name);
+        BOOL result          = open_regisry_key(&regkey, HKEY_LOCAL_MACHINE, key_path, KEY_SET_VALUE);
+        if (result) {
+            if (!set_registry_value_str(regkey, "ContentDir", new_path_full)) {
+                close_registry_key(&regkey);
+                _ERROR("Failed to update ContentDir value in registry key");
+                MessageBox(hwnd,
+                           "Failed to update ContentDir value in registry key",
+                           "Error relocating library",
+                           MB_OK | MB_ICONERROR);
+                return;
+            }
+        }
+        close_registry_key(&regkey);
+
+        _INFO("Finished relocating library");
+        MessageBox(hwnd, "Library has been successfully relocated", "Success", MB_OK | MB_ICONINFORMATION);
+
+        BOOL query_result = query_libraries(hwnd);
+        if (!query_result) {
+            MessageBox(hwnd,
+                       "Failed to query libraries.\n\nCheck 'K8-LRT.log' for details.",
+                       "Error",
+                       MB_OK | MB_ICONERROR);
+        }
+        SELECTED_INDEX = -1;
+    }
 }
 
 void on_view_log(HWND hwnd) {
@@ -1905,6 +2445,10 @@ int WINAPI WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_cmd
 
     log_init("K8-LRT.log");
 
+    HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    if (FAILED(hr))
+        return 1;
+
     // Initialize common controls
     INITCOMMONCONTROLSEX icc;
     icc.dwSize = sizeof(icc);
@@ -1912,6 +2456,7 @@ int WINAPI WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_cmd
     InitCommonControlsEx(&icc);
 
     arena_init(_PROGRAM_MEMORY);
+    strpool_init();
     enable_backup_privilege();
 
     WNDCLASS wc      = {0};
@@ -1942,9 +2487,8 @@ int WINAPI WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_cmd
                                h_instance,
                                NULL);
 
-    if (hwnd == NULL) {
+    if (hwnd == NULL)
         return 1;
-    }
 
     ShowWindow(hwnd, n_cmd_show);
 
@@ -1961,8 +2505,11 @@ int WINAPI WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_cmd
     }
 #endif
 
+    CoUninitialize();
+
     log_close();
     arena_destroy();
+    strpool_destroy();
 
     return 0;
 }

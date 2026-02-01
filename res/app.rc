@@ -29,7 +29,7 @@ END
 IDD_REMOVE_LIBRARYBOX DIALOGEX 0, 0, 320, 200
 STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "Confirm Library Removal"
-FONT 8, "MS Shell Dlg", 400, 0, 0x1
+FONT 8, "MS Shell Dlg", 320, 0, 0x1
 BEGIN
     ICON            IDI_APPICON, IDC_STATIC, 14, 20, 20, 20
     LTEXT           "You are about to remove the following library:", IDC_STATIC, 44, 14, 260, 8
@@ -77,6 +77,24 @@ BEGIN
     
     DEFPUSHBUTTON   "Remove Selected", IDREMOVE_BATCH, 160, 371, 80, 14
     PUSHBUTTON      "Cancel", IDCANCEL_BATCH, 246, 371, 80, 14
+END
+
+IDD_RELOCATE_LIBRARYBOX DIALOGEX 0, 0, 320, 120
+STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Relocate Library"
+FONT 8, "MS Shell Dlg", 420, 0, 0x1
+BEGIN
+    ICON            IDI_APPICON, IDC_STATIC, 14, 20, 20, 20
+    LTEXT           "Relocating:", IDC_STATIC, 44, 14, 120, 8
+    LTEXT           "", IDC_LIB_NAME_LABEL, 44, 28, 120, 8
+    LTEXT           "", IDC_CONTENT_DIR_LABEL, 44, 38, 280, 8
+        
+    LTEXT           "Select a new location:", IDC_STATIC, 14, 60, 120, 8
+    EDITTEXT        IDC_RELOCATE_PATH_EDIT, 14, 72, 270, 14, ES_AUTOHSCROLL
+    PUSHBUTTON      "...", IDC_RELOCATE_BROWSE_BTN, 286, 72, 20, 14
+    
+    DEFPUSHBUTTON   "Relocate", IDRELOCATE_RELOCATE, 140, 96, 80, 14
+    PUSHBUTTON      "Cancel", IDCANCEL_RELOCATE, 226, 96, 80, 14
 END
 
 //=============================================================================//

@@ -13,7 +13,7 @@ LDFLAGS_CONF=/OPT:REF /OPT:ICF
 !ENDIF
 
 LDFLAGS=/link user32.lib gdi32.lib advapi32.lib shell32.lib \
-    ole32.lib shlwapi.lib comctl32.lib winhttp.lib \
+    ole32.lib shlwapi.lib comctl32.lib winhttp.lib pathcch.lib \
     /SUBSYSTEM:WINDOWS $(LDFLAGS_CONF)
 
 SRC_DIR=src
@@ -45,6 +45,7 @@ $(TARGET): $(OBJECTS)
 
 clean:
 	@if exist build rmdir /S /Q build
+	@if exist vc140.pdb rm vc140.pdb
 
 rebuild: clean all
 
