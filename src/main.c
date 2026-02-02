@@ -54,7 +54,7 @@
 #include <Shlwapi.h>   // Shell API
 #include <shlobj.h>    // More Shell API
 #include <winuser.h>   // Dialogs and display
-#include <CommCtrl.h>  // For modern Windows styling (Common Controls)
+#include <commctrl.h>  // For modern Windows styling (Common Controls)
 #include <winhttp.h>   // For checking for updates
 #include <pathcch.h>   // For long path support and newer file API (Windows 8+)
 #include <strsafe.h>   // Window API safer string handling
@@ -62,6 +62,7 @@
 //====================================================================//
 //                          -- LOGGING --                             //
 //====================================================================//
+#pragma region logging
 
 typedef enum {
     LOG_INFO,
@@ -73,6 +74,236 @@ typedef enum {
 
 static BOOL ATTACHED_TO_CONSOLE = FALSE;
 static FILE* LOG_FILE           = NULL;
+
+void log_msg(log_level level, const char* fmt, ...);
+void log_init(const char* filename);
+void log_close(void);
+
+#define _INFO(fmt, ...) log_msg(LOG_INFO, fmt, ##__VA_ARGS__)
+#define _WARN(fmt, ...) log_msg(LOG_WARN, fmt, ##__VA_ARGS__)
+#define _ERROR(fmt, ...) log_msg(LOG_ERROR, fmt, ##__VA_ARGS__)
+#define _FATAL(fmt, ...)                                                                                               \
+    do {                                                                                                               \
+        log_msg(LOG_FATAL, fmt, ##__VA_ARGS__);                                                                        \
+        quick_exit(1);                                                                                                 \
+    } while (FALSE)
+#define _LOG(fmt, ...) log_msg(LOG_DEBUG, fmt, ##__VA_ARGS__)
+
+#pragma endregion
+//====================================================================//
+//                           -- MEMORY --                             //
+//====================================================================//
+#pragma region memory
+
+#define INITIAL_STRPOOL_CAPACITY 16
+
+typedef struct {
+    char** strings;
+    size_t count;
+    size_t capacity;
+
+    wchar_t** wide_strings;
+    size_t wide_count;
+    size_t wide_capacity;
+} strpool;
+
+// Global string pool instance
+static strpool STRPOOL;
+
+void strpool_init(void) {
+    STRPOOL.strings = malloc(INITIAL_STRPOOL_CAPACITY * sizeof(char*));
+    if (!STRPOOL.strings)
+        _FATAL("Failed to allocate memory for string pool");
+    STRPOOL.count    = 0;
+    STRPOOL.capacity = INITIAL_STRPOOL_CAPACITY;
+
+    STRPOOL.wide_strings = malloc(INITIAL_STRPOOL_CAPACITY * sizeof(wchar_t*));
+    if (!STRPOOL.wide_strings)
+        _FATAL("Failed to allocate memory for string pool");
+    STRPOOL.wide_count    = 0;
+    STRPOOL.wide_capacity = INITIAL_STRPOOL_CAPACITY;
+}
+
+char* strpool_strdup(const char* str) {
+    if (!str)
+        return NULL;
+
+    char* copy = _strdup(str);
+    if (!copy)
+        return NULL;
+
+    if (STRPOOL.count >= STRPOOL.capacity) {
+        const size_t new_cap = STRPOOL.capacity * 2;
+        char** new_strs      = realloc(STRPOOL.strings, new_cap * sizeof(char*));
+        if (!new_strs) {
+            free(copy);
+            return NULL;
+        }
+        STRPOOL.strings  = new_strs;
+        STRPOOL.capacity = new_cap;
+    }
+
+    STRPOOL.strings[STRPOOL.count++] = copy;
+    return copy;
+}
+
+wchar_t* strpool_wstrdup(const wchar_t* str) {
+    if (!str)
+        return NULL;
+
+    wchar_t* copy = _wcsdup(str);
+    if (!copy)
+        return NULL;
+
+    if (STRPOOL.wide_count >= STRPOOL.wide_capacity) {
+        const size_t new_cap = STRPOOL.wide_capacity * 2;
+        wchar_t** new_strs   = realloc(STRPOOL.wide_strings, new_cap * sizeof(wchar_t*));
+        if (!new_strs) {
+            free(copy);
+            return NULL;
+        }
+        STRPOOL.wide_strings  = new_strs;
+        STRPOOL.wide_capacity = new_cap;
+    }
+
+    STRPOOL.wide_strings[STRPOOL.wide_count++] = copy;
+    return copy;
+}
+
+char* strpool_sprintf(const char* fmt, ...) {
+    va_list args, args_copy;
+    va_start(args, fmt);
+    va_copy(args_copy, args);
+
+    const int size = vsnprintf(NULL, 0, fmt, args);
+    va_end(args);
+
+    if (size < 0) {
+        va_end(args_copy);
+        return NULL;
+    }
+
+    char* str = malloc(size + 1);
+    if (!str) {
+        va_end(args_copy);
+        return NULL;
+    }
+
+    vsnprintf(str, size + 1, fmt, args_copy);
+    va_end(args_copy);
+
+    if (STRPOOL.count >= STRPOOL.capacity) {
+        const size_t new_capacity = STRPOOL.capacity * 2;
+        char** new_strings        = realloc(STRPOOL.strings, new_capacity * sizeof(char*));
+        if (!new_strings) {
+            free(str);
+            return NULL;
+        }
+        STRPOOL.strings  = new_strings;
+        STRPOOL.capacity = new_capacity;
+    }
+
+    STRPOOL.strings[STRPOOL.count++] = str;
+    return str;
+}
+
+wchar_t* strpool_wsprintf(const wchar_t* fmt, ...) {
+    va_list args, args_copy;
+    va_start(args, fmt);
+    va_copy(args_copy, args);
+
+    const int size = _vscwprintf(fmt, args);
+    va_end(args);
+
+    if (size < 0) {
+        va_end(args_copy);
+        return NULL;
+    }
+
+    wchar_t* str = malloc((size + 1) * sizeof(wchar_t));
+    if (!str) {
+        va_end(args_copy);
+        return NULL;
+    }
+
+    vswprintf(str, size + 1, fmt, args_copy);
+    va_end(args_copy);
+
+    if (STRPOOL.wide_count >= STRPOOL.wide_capacity) {
+        const size_t new_capacity = STRPOOL.wide_capacity * 2;
+        wchar_t** new_strings     = realloc(STRPOOL.wide_strings, new_capacity * sizeof(wchar_t*));
+        if (!new_strings) {
+            free(str);
+            return NULL;
+        }
+        STRPOOL.wide_strings  = new_strings;
+        STRPOOL.wide_capacity = new_capacity;
+    }
+
+    STRPOOL.wide_strings[STRPOOL.wide_count++] = str;
+    return str;
+}
+
+char* strpool_alloc(size_t count) {
+    char* buffer = malloc(count);
+    if (!buffer)
+        return NULL;
+
+    if (STRPOOL.count >= STRPOOL.capacity) {
+        const size_t new_capacity = STRPOOL.capacity * 2;
+        char** new_strings        = realloc(STRPOOL.strings, new_capacity * sizeof(char*));
+        if (!new_strings) {
+            free(buffer);
+            return NULL;
+        }
+        STRPOOL.strings  = new_strings;
+        STRPOOL.capacity = new_capacity;
+    }
+
+    STRPOOL.strings[STRPOOL.count++] = buffer;
+    return buffer;
+}
+
+wchar_t* strpool_walloc(size_t count) {
+    wchar_t* buffer = malloc(count * sizeof(wchar_t));
+    if (!buffer)
+        return NULL;
+
+    if (STRPOOL.wide_count >= STRPOOL.wide_capacity) {
+        const size_t new_capacity = STRPOOL.wide_capacity * 2;
+        wchar_t** new_strings     = realloc(STRPOOL.wide_strings, new_capacity * sizeof(wchar_t*));
+        if (!new_strings) {
+            free(buffer);
+            return NULL;
+        }
+        STRPOOL.wide_strings  = new_strings;
+        STRPOOL.wide_capacity = new_capacity;
+    }
+
+    STRPOOL.wide_strings[STRPOOL.wide_count++] = buffer;
+    return buffer;
+}
+
+void strpool_destroy(void) {
+    for (size_t i = 0; i < STRPOOL.count; i++)
+        free(STRPOOL.strings[i]);
+    free(STRPOOL.strings);
+
+    for (size_t i = 0; i < STRPOOL.wide_count; i++)
+        free(STRPOOL.wide_strings[i]);
+    free(STRPOOL.wide_strings);
+}
+
+void strpool_reset(void) {
+    strpool_destroy();
+    strpool_init();
+}
+
+#pragma endregion
+//====================================================================//
+//                          -- LOGGING --                             //
+//====================================================================//
+#pragma region logging
 
 void log_msg(log_level level, const char* fmt, ...) {
     if (!LOG_FILE)
@@ -138,7 +369,7 @@ void log_msg(log_level level, const char* fmt, ...) {
 }
 
 void log_init(const char* filename) {
-    errno_t result = fopen_s(&LOG_FILE, filename, "a+");  // append (+ read) mode
+    const errno_t result = fopen_s(&LOG_FILE, filename, "a+");  // append (+ read) mode
     if (result == 0) {
         log_msg(LOG_INFO, "--- K8-LRT Started ---");
     } else {
@@ -154,287 +385,11 @@ void log_close(void) {
     }
 }
 
-#define _INFO(fmt, ...) log_msg(LOG_INFO, fmt, ##__VA_ARGS__)
-#define _WARN(fmt, ...) log_msg(LOG_WARN, fmt, ##__VA_ARGS__)
-#define _ERROR(fmt, ...) log_msg(LOG_ERROR, fmt, ##__VA_ARGS__)
-#define _FATAL(fmt, ...)                                                                                               \
-    do {                                                                                                               \
-        log_msg(LOG_FATAL, fmt, ##__VA_ARGS__);                                                                        \
-        quick_exit(1);                                                                                                 \
-    } while (FALSE)
-#define _LOG(fmt, ...) log_msg(LOG_DEBUG, fmt, ##__VA_ARGS__)
-
-//====================================================================//
-//                           -- MEMORY --                             //
-//====================================================================//
-
-#define _ARENA_BASE (sizeof(arena))
-#define _PAGESIZE (sizeof(void*))
-#define _ALIGN_UP(x, align) (((x) + (align) - 1) & ~((align) - 1))
-#define _KB(n) ((UINT64)(n) << 10)
-#define _MB(n) ((UINT64)(n) << 20)
-#define _GB(n) ((UINT64)(n) << 30)
-#define _PROGRAM_MEMORY (_MB(4))  // Define how much memory to give K8-LRT (4 megabytes)
-
-typedef struct {
-    UINT64 capacity;
-    UINT64 position;
-} arena;
-
-static arena* ARENA = NULL;
-
-void arena_init(UINT64 capacity) {
-    ARENA = (arena*)malloc(capacity);
-    if (!ARENA) {
-        _FATAL("Failed to allocate memory");
-    }
-
-    ARENA->position = _ARENA_BASE;
-    ARENA->capacity = capacity;
-}
-
-void arena_destroy(void) {
-    free(ARENA);
-}
-
-void* arena_push(UINT64 size, BOOL non_zero) {
-    UINT64 pos_aligned = _ALIGN_UP(ARENA->position, _PAGESIZE);
-    UINT64 new_pos     = pos_aligned + size;
-
-    if (new_pos > ARENA->capacity) {
-        _FATAL("Arena capacity is full");
-    }
-
-    ARENA->position = new_pos;
-    UINT8* new_mem  = (UINT8*)ARENA + pos_aligned;
-
-    if (!non_zero) {
-        memset(new_mem, 0, size);
-    }
-
-    return new_mem;
-}
-
-void arena_pop(UINT64 size) {
-    size = min(size, ARENA->position - _ARENA_BASE);
-    ARENA->position -= size;
-}
-
-void arena_pop_to(UINT64 position) {
-    UINT64 size = position < ARENA->position ? ARENA->position - 1 : 0;
-    arena_pop(size);
-}
-
-void arena_clear(void) {
-    arena_pop_to(_ARENA_BASE);
-}
-
-#define _ALLOC_ARRAY(type, count) (type*)arena_push(sizeof(type) * (count), FALSE)
-#define _ALLOC_STR(length) (char*)arena_push(sizeof(char) * (length), FALSE)
-#define _ALLOC(type) (type*)arena_push(sizeof(type), FALSE)
-
-#define INITIAL_STRPOOL_CAPACITY 16
-
-typedef struct {
-    char** strings;
-    size_t count;
-    size_t capacity;
-
-    wchar_t** wide_strings;
-    size_t wide_count;
-    size_t wide_capacity;
-} strpool;
-
-// Global string pool instance
-static strpool STRPOOL;
-
-void strpool_init(void) {
-    STRPOOL.strings = malloc(INITIAL_STRPOOL_CAPACITY * sizeof(char*));
-    if (!STRPOOL.strings)
-        _FATAL("Failed to allocate memory for string pool");
-    STRPOOL.count    = 0;
-    STRPOOL.capacity = INITIAL_STRPOOL_CAPACITY;
-
-    STRPOOL.wide_strings = malloc(INITIAL_STRPOOL_CAPACITY * sizeof(wchar_t*));
-    if (!STRPOOL.wide_strings)
-        _FATAL("Failed to allocate memory for string pool");
-    STRPOOL.wide_count    = 0;
-    STRPOOL.wide_capacity = INITIAL_STRPOOL_CAPACITY;
-}
-
-char* strpool_strdup(const char* str) {
-    if (!str)
-        return NULL;
-
-    char* copy = _strdup(str);
-    if (!copy)
-        return NULL;
-
-    if (STRPOOL.count >= STRPOOL.capacity) {
-        size_t new_cap  = STRPOOL.capacity * 2;
-        char** new_strs = realloc(STRPOOL.strings, new_cap * sizeof(char*));
-        if (!new_strs) {
-            free(copy);
-            return NULL;
-        }
-        STRPOOL.strings  = new_strs;
-        STRPOOL.capacity = new_cap;
-    }
-
-    STRPOOL.strings[STRPOOL.count++] = copy;
-    return copy;
-}
-
-wchar_t* strpool_wstrdup(const wchar_t* str) {
-    if (!str)
-        return NULL;
-
-    wchar_t* copy = _wcsdup(str);
-    if (!copy)
-        return NULL;
-
-    if (STRPOOL.wide_count >= STRPOOL.wide_capacity) {
-        size_t new_cap     = STRPOOL.wide_capacity * 2;
-        wchar_t** new_strs = realloc(STRPOOL.wide_strings, new_cap * sizeof(wchar_t*));
-        if (!new_strs) {
-            free(copy);
-            return NULL;
-        }
-        STRPOOL.wide_strings  = new_strs;
-        STRPOOL.wide_capacity = new_cap;
-    }
-
-    STRPOOL.wide_strings[STRPOOL.wide_count++] = copy;
-    return copy;
-}
-
-char* strpool_sprintf(const char* fmt, ...) {
-    va_list args, args_copy;
-    va_start(args, fmt);
-    va_copy(args_copy, args);
-
-    int size = vsnprintf(NULL, 0, fmt, args);
-    va_end(args);
-
-    if (size < 0) {
-        va_end(args_copy);
-        return NULL;
-    }
-
-    char* str = malloc(size + 1);
-    if (!str) {
-        va_end(args_copy);
-        return NULL;
-    }
-
-    vsnprintf(str, size + 1, fmt, args_copy);
-    va_end(args_copy);
-
-    if (STRPOOL.count >= STRPOOL.capacity) {
-        size_t new_capacity = STRPOOL.capacity * 2;
-        char** new_strings  = realloc(STRPOOL.strings, new_capacity * sizeof(char*));
-        if (!new_strings) {
-            free(str);
-            return NULL;
-        }
-        STRPOOL.strings  = new_strings;
-        STRPOOL.capacity = new_capacity;
-    }
-
-    STRPOOL.strings[STRPOOL.count++] = str;
-    return str;
-}
-
-wchar_t* strpool_wsprintf(const wchar_t* fmt, ...) {
-    va_list args, args_copy;
-    va_start(args, fmt);
-    va_copy(args_copy, args);
-
-    int size = _vscwprintf(fmt, args);
-    va_end(args);
-
-    if (size < 0) {
-        va_end(args_copy);
-        return NULL;
-    }
-
-    wchar_t* str = malloc((size + 1) * sizeof(wchar_t));
-    if (!str) {
-        va_end(args_copy);
-        return NULL;
-    }
-
-    vswprintf(str, size + 1, fmt, args_copy);
-    va_end(args_copy);
-
-    if (STRPOOL.wide_count >= STRPOOL.wide_capacity) {
-        size_t new_capacity   = STRPOOL.wide_capacity * 2;
-        wchar_t** new_strings = realloc(STRPOOL.wide_strings, new_capacity * sizeof(wchar_t*));
-        if (!new_strings) {
-            free(str);
-            return NULL;
-        }
-        STRPOOL.wide_strings  = new_strings;
-        STRPOOL.wide_capacity = new_capacity;
-    }
-
-    STRPOOL.wide_strings[STRPOOL.wide_count++] = str;
-    return str;
-}
-
-char* strpool_alloc(size_t count) {
-    char* buffer = malloc(count);
-    if (!buffer)
-        return NULL;
-
-    if (STRPOOL.count >= STRPOOL.capacity) {
-        size_t new_capacity = STRPOOL.capacity * 2;
-        char** new_strings  = realloc(STRPOOL.strings, new_capacity * sizeof(char*));
-        if (!new_strings) {
-            free(buffer);
-            return NULL;
-        }
-        STRPOOL.strings  = new_strings;
-        STRPOOL.capacity = new_capacity;
-    }
-
-    STRPOOL.strings[STRPOOL.count++] = buffer;
-    return buffer;
-}
-
-wchar_t* strpool_walloc(size_t count) {
-    wchar_t* buffer = malloc(count * sizeof(wchar_t));
-    if (!buffer)
-        return NULL;
-
-    if (STRPOOL.wide_count >= STRPOOL.wide_capacity) {
-        size_t new_capacity   = STRPOOL.wide_capacity * 2;
-        wchar_t** new_strings = realloc(STRPOOL.wide_strings, new_capacity * sizeof(wchar_t*));
-        if (!new_strings) {
-            free(buffer);
-            return NULL;
-        }
-        STRPOOL.wide_strings  = new_strings;
-        STRPOOL.wide_capacity = new_capacity;
-    }
-
-    STRPOOL.wide_strings[STRPOOL.wide_count++] = buffer;
-    return buffer;
-}
-
-void strpool_destroy(void) {
-    for (size_t i = 0; i < STRPOOL.count; i++)
-        free(STRPOOL.strings[i]);
-    free(STRPOOL.strings);
-
-    for (size_t i = 0; i < STRPOOL.wide_count; i++)
-        free(STRPOOL.wide_strings[i]);
-    free(STRPOOL.wide_strings);
-}
-
+#pragma endregion
 //====================================================================//
 //                   -- UI ELEMENT DEFINITIONS --                     //
 //====================================================================//
+#pragma region ui element definitions
 
 #include "resource.h"
 
@@ -449,9 +404,11 @@ static HWND H_RELOCATE_BUTTON            = NULL;
 
 static HFONT UI_FONT = NULL;
 
+#pragma endregion
 //====================================================================//
 //                          -- GLOBALS --                             //
 //====================================================================//
+#pragma region globals
 
 #define _WINDOW_W 300
 #define _WINDOW_H 440
@@ -502,9 +459,9 @@ struct library_entry {
     const char* content_dir;
 };
 
-static library_entry* LIBRARIES = {NULL};
-static int LIB_COUNT            = 0;
-static int SELECTED_INDEX       = -1;
+static library_entry LIBRARIES[_MAX_LIB_COUNT];
+static int LIB_COUNT      = 0;
+static int SELECTED_INDEX = -1;
 
 // Whether this is the first time querying for libraries
 static BOOL INITIAL_SEARCH     = TRUE;
@@ -566,9 +523,12 @@ static char* KEY_EXCLUSION_PATTERNS[KEY_EXCLUSION_PATTERNS_SIZE] = {
   "Waves*",
 };
 
+#pragma endregion
 //====================================================================//
 //                      -- HELPER FUNCTIONS --                        //
 //====================================================================//
+#pragma region helper functions
+
 #ifndef NDEBUG
     #define _ASSERT(condition)                                                                                         \
         if (!(condition)) {                                                                                            \
@@ -594,13 +554,13 @@ wchar_t* make_long_path(const char* path) {
     if (!path)
         return NULL;
 
-    int needed = MultiByteToWideChar(CP_UTF8, 0, path, -1, NULL, 0);
+    const int needed = MultiByteToWideChar(CP_UTF8, 0, path, -1, NULL, 0);
     if (needed == 0)
         return NULL;
 
     // Allocate buffer: "\\?\" + path + null
-    size_t buffer_size = needed + 10;  // Extra space for prefix and safety
-    wchar_t* temp      = (wchar_t*)malloc(sizeof(wchar_t) * buffer_size);
+    const size_t buffer_size = needed + 10;  // Extra space for prefix and safety
+    wchar_t* temp            = (wchar_t*)malloc(sizeof(wchar_t) * buffer_size);
     if (!temp)
         return NULL;
 
@@ -647,9 +607,9 @@ wchar_t* join_paths_wide(const wchar_t* base, const wchar_t* tail) {
     if (!base || !tail)
         return NULL;
 
-    size_t base_len   = wcslen(base);
-    size_t append_len = wcslen(tail);
-    size_t total      = base_len + append_len + 2;  // +1 for backslash, +1 for null
+    const size_t base_len   = wcslen(base);
+    const size_t append_len = wcslen(tail);
+    const size_t total      = base_len + append_len + 2;  // +1 for backslash, +1 for null
 
     wchar_t* result = strpool_walloc(total);
     if (!result)
@@ -669,7 +629,7 @@ wchar_t* join_paths_wide(const wchar_t* base, const wchar_t* tail) {
 char* get_local_appdata_path(void) {
     PWSTR psz_path = NULL;
 
-    HRESULT hr = SHGetKnownFolderPath(&FOLDERID_LocalAppData, 0, NULL, &psz_path);
+    const HRESULT hr = SHGetKnownFolderPath(&FOLDERID_LocalAppData, 0, NULL, &psz_path);
     if (SUCCEEDED(hr)) {
         char path[MAX_PATH];
         WideCharToMultiByte(CP_ACP, 0, psz_path, -1, path, MAX_PATH, NULL, NULL);
@@ -697,12 +657,12 @@ void attach_console() {
 }
 
 BOOL file_exists(const char* path) {
-    DWORD dw_attrib = GetFileAttributesA(path);
+    const DWORD dw_attrib = GetFileAttributesA(path);
     return (dw_attrib != INVALID_FILE_ATTRIBUTES && !(dw_attrib & FILE_ATTRIBUTE_DIRECTORY));
 }
 
 BOOL directory_exists(const char* path) {
-    DWORD dw_attrib = GetFileAttributesA(path);
+    const DWORD dw_attrib = GetFileAttributesA(path);
     return (dw_attrib != INVALID_FILE_ATTRIBUTES && (dw_attrib & FILE_ATTRIBUTE_DIRECTORY));
 }
 
@@ -721,9 +681,9 @@ BOOL rm_rf_recursive(const wchar_t* path) {
         return FALSE;
 
     WIN32_FIND_DATAW find_data;
-    HANDLE hFind = FindFirstFileW(search_path, &find_data);
+    const HANDLE h_find = FindFirstFileW(search_path, &find_data);
 
-    if (hFind == INVALID_HANDLE_VALUE) {
+    if (h_find == INVALID_HANDLE_VALUE) {
         return FALSE;
     }
 
@@ -754,9 +714,9 @@ BOOL rm_rf_recursive(const wchar_t* path) {
         if (!success)
             break;
 
-    } while (FindNextFileW(hFind, &find_data));
+    } while (FindNextFileW(h_find, &find_data));
 
-    FindClose(hFind);
+    FindClose(h_find);
 
     if (success) {
         if (!RemoveDirectoryW(path)) {
@@ -771,8 +731,7 @@ BOOL rm_rf_recursive(const wchar_t* path) {
 BOOL rm_rf(const wchar_t* directory) {
     if (!directory)
         return FALSE;
-    BOOL result = rm_rf_recursive(directory);
-    return result;
+    return rm_rf_recursive(directory);
 }
 
 BOOL copy_directory_recursive(const wchar_t* src, const wchar_t* dst) {
@@ -788,9 +747,9 @@ BOOL copy_directory_recursive(const wchar_t* src, const wchar_t* dst) {
         return FALSE;
 
     WIN32_FIND_DATAW find_data;
-    HANDLE hFind = FindFirstFileW(search_path, &find_data);
+    const HANDLE h_find = FindFirstFileW(search_path, &find_data);
 
-    if (hFind == INVALID_HANDLE_VALUE) {
+    if (h_find == INVALID_HANDLE_VALUE) {
         _ERROR("FindFirstFileW failed for: %ls (Error: %lu)", src, GetLastError());
         return FALSE;
     }
@@ -820,7 +779,7 @@ BOOL copy_directory_recursive(const wchar_t* src, const wchar_t* dst) {
             params.dwSize                        = sizeof(params);
             params.dwCopyFlags                   = COPY_FILE_NO_BUFFERING;
 
-            HRESULT hr = CopyFile2(src_path, dst_path, &params);
+            const HRESULT hr = CopyFile2(src_path, dst_path, &params);
             if (FAILED(hr)) {
                 _ERROR("Failed to copy file: %ls to %ls (HRESULT: 0x%08X)", src_path, dst_path, hr);
                 success = FALSE;
@@ -830,9 +789,9 @@ BOOL copy_directory_recursive(const wchar_t* src, const wchar_t* dst) {
         if (!success)
             break;
 
-    } while (FindNextFileW(hFind, &find_data));
+    } while (FindNextFileW(h_find, &find_data));
 
-    FindClose(hFind);
+    FindClose(h_find);
     return success;
 }
 
@@ -841,9 +800,7 @@ BOOL copy_directory(const char* src, const char* dst) {
     wchar_t* dst_w = make_long_path(dst);
     if (!src_w || !dst_w)
         return FALSE;
-
-    BOOL result = copy_directory_recursive(src_w, dst_w);
-    return result;
+    return copy_directory_recursive(src_w, dst_w);
 }
 
 BOOL list_contains(char* haystack[], const int haystack_size, const char* needle) {
@@ -891,12 +848,12 @@ void enable_backup_privilege(void) {
 }
 
 void clear_libraries(void) {
-    if (ARENA->position > _ARENA_BASE) {
-        arena_clear();
-    }
+    strpool_reset();
 
-    // Reset libraries array
-    LIBRARIES = _ALLOC_ARRAY(library_entry, _MAX_LIB_COUNT);
+    for (int i = 0; i < LIB_COUNT; i++) {
+        LIBRARIES[i].name        = NULL;
+        LIBRARIES[i].content_dir = NULL;
+    }
 
     // Reset list box contents
     SendMessage(H_LISTBOX, LB_RESETCONTENT, 0, 0);
@@ -905,8 +862,8 @@ void clear_libraries(void) {
     LIB_COUNT      = 0;
 }
 
-BOOL open_regisry_key(HKEY* key, HKEY base, const char* path, UINT sam) {
-    LONG result = RegOpenKeyExA(base, path, 0, (REGSAM)sam, key);
+BOOL open_registry_key(HKEY* key, HKEY base, const char* path, UINT sam) {
+    const LONG result = RegOpenKeyExA(base, path, 0, (REGSAM)sam, key);
     if (result != ERROR_SUCCESS) {
         _ERROR("Failed to open registry key: '%s'", path);
         return FALSE;
@@ -919,8 +876,8 @@ void close_registry_key(HKEY* key) {
     RegCloseKey(*key);
 }
 
-BOOL delete_regisry_key(HKEY base_key, const char* key) {
-    LONG result = RegDeleteKeyA(base_key, key);
+BOOL delete_registry_key(HKEY base_key, const char* key) {
+    const LONG result = RegDeleteKeyA(base_key, key);
     if (result != ERROR_SUCCESS) {}
 
     return TRUE;
@@ -946,7 +903,7 @@ const char* get_registry_value_str(HKEY key, const char* value_name) {
     DWORD buffer_size = sizeof(value);
     DWORD value_type;
 
-    LSTATUS status = RegQueryValueExA(key, value_name, NULL, &value_type, (LPBYTE)value, &buffer_size);
+    const LSTATUS status = RegQueryValueExA(key, value_name, NULL, &value_type, (LPBYTE)value, &buffer_size);
     if (status == ERROR_SUCCESS && value_type == REG_SZ) {
         return strpool_strdup(value);
     }
@@ -955,7 +912,8 @@ const char* get_registry_value_str(HKEY key, const char* value_name) {
 }
 
 BOOL set_registry_value_str(HKEY key, const char* value_name, const char* new_value) {
-    LSTATUS status = RegSetValueExA(key, value_name, 0, REG_SZ, (const BYTE*)new_value, (DWORD)(strlen(new_value) + 1));
+    const LSTATUS status =
+      RegSetValueExA(key, value_name, 0, REG_SZ, (const BYTE*)new_value, (DWORD)(strlen(new_value) + 1));
     return (status == ERROR_SUCCESS);
 }
 
@@ -964,33 +922,30 @@ BOOL query_libraries(HWND hwnd) {
 
     HKEY base_key;
     LPCSTR base_path = "SOFTWARE\\Native Instruments";
-    BOOL result      = open_regisry_key(&base_key, HKEY_LOCAL_MACHINE, base_path, KEY_READ);
-    if (!result)
+    BOOL open_result = open_registry_key(&base_key, HKEY_LOCAL_MACHINE, base_path, KEY_READ);
+    if (!open_result)
         return FALSE;
 
     char* keys[_MAX_LIB_COUNT] = {0};
-    int key_count              = enumerate_registry_keys(base_key, keys);
+    const int key_count        = enumerate_registry_keys(base_key, keys);
 
     close_registry_key(&base_key);
 
     for (int i = 0; i < key_count; i++) {
-        if ((ARENA->position - _ARENA_BASE) + sizeof(library_entry) > ARENA->capacity) {
-            _FATAL("Memory capacity reached (%d > %d)",
-                   (ARENA->position - _ARENA_BASE) + sizeof(library_entry),
-                   ARENA->capacity);
-        }
+        if (i >= _MAX_LIB_COUNT)
+            break;
 
         const char* key_str = keys[i];
 
-        BOOL in_exclusion_list = list_contains(KEY_EXCLUSION_LIST, KEY_EXCLUSION_LIST_SIZE, key_str);
-        BOOL matches_exclusion_pattern =
+        const BOOL in_exclusion_list = list_contains(KEY_EXCLUSION_LIST, KEY_EXCLUSION_LIST_SIZE, key_str);
+        const BOOL matches_exclusion_pattern =
           matches_pattern_in_list(KEY_EXCLUSION_PATTERNS, KEY_EXCLUSION_PATTERNS_SIZE, key_str);
         if (in_exclusion_list || matches_exclusion_pattern)
             continue;
 
         HKEY key;
-        BOOL result = open_regisry_key(&key, HKEY_LOCAL_MACHINE, join_paths(base_path, key_str), KEY_READ);
-        if (!result)
+        open_result = open_registry_key(&key, HKEY_LOCAL_MACHINE, join_paths(base_path, key_str), KEY_READ);
+        if (!open_result)
             continue;
 
         library_entry entry     = {.name = key_str, NULL};
@@ -1036,9 +991,9 @@ BOOL remove_registry_keys(const char* key) {
             HKEY h_subkey;
             if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, join_paths(base_path, key), 0, KEY_READ, &h_subkey) ==
                 ERROR_SUCCESS) {
-                char* reg_filename = join_str(key, ".reg");
+                const char* reg_filename = join_str(key, ".reg");
                 DeleteFileA(reg_filename);
-                LONG backup_res = RegSaveKeyExA(h_subkey, reg_filename, NULL, REG_LATEST_FORMAT);
+                const LONG backup_res = RegSaveKeyExA(h_subkey, reg_filename, NULL, REG_LATEST_FORMAT);
 
                 if (backup_res != ERROR_SUCCESS) {
                     _ERROR("Failed to backup registry entry for key: 'HKEY_LOCAL_MACHINE\\%s\\%s'", base_path, key);
@@ -1050,7 +1005,7 @@ BOOL remove_registry_keys(const char* key) {
             }
         }
 
-        LONG res = RegDeleteKeyA(h_key, key);
+        const LONG res = RegDeleteKeyA(h_key, key);
         if (res != ERROR_SUCCESS) {
             _ERROR("Failed to delete registry key: 'HKEY_LOCAL_MACHINE\\%s\\%s'", base_path, key);
             RegCloseKey(h_key);
@@ -1070,7 +1025,7 @@ BOOL remove_xml_file(const char* name) {
 
     if (file_exists(filename)) {
         if (BACKUP_FILES) {
-            char* bak_filename = strpool_sprintf("%s.bak", filename);
+            const char* bak_filename = strpool_sprintf("%s.bak", filename);
             if (!CopyFileExA(filename, bak_filename, NULL, NULL, NULL, 0)) {
                 _ERROR("Failed to backup XML file: '%s'", filename);
                 return FALSE;
@@ -1106,13 +1061,13 @@ BOOL remove_all_files_in_dir(const char* directory, BOOL backup) {
                     if (backup) {
                         char* bak_filename = join_str(file_path, ".bak");
                         if (file_exists(bak_filename)) {
-                            BOOL deleted = DeleteFileA(bak_filename);
+                            const BOOL deleted = DeleteFileA(bak_filename);
                             if (!deleted) {
                                 _ERROR("Failed to delete file: '%s'", bak_filename);
                                 return FALSE;
                             }
                         }
-                        BOOL copied = CopyFileExA(file_path, bak_filename, NULL, NULL, NULL, 0);
+                        const BOOL copied = CopyFileExA(file_path, bak_filename, NULL, NULL, NULL, 0);
                         if (!copied) {
                             _ERROR("Failed to backup file: '%s'", file_path);
                             return FALSE;
@@ -1135,16 +1090,16 @@ BOOL remove_all_files_in_dir(const char* directory, BOOL backup) {
 }
 
 BOOL remove_cache_files(void) {
-    char* cache_path = join_paths(get_local_appdata_path(), _LIB_CACHE_ROOT);
+    const char* cache_path = join_paths(get_local_appdata_path(), _LIB_CACHE_ROOT);
     return remove_all_files_in_dir(cache_path, BACKUP_FILES);
 }
 
 BOOL remove_db3(void) {
-    char* appdata_local = get_local_appdata_path();
-    char* db3           = join_paths(appdata_local, _DB3_ROOT);
+    const char* appdata_local = get_local_appdata_path();
+    const char* db3           = join_paths(appdata_local, _DB3_ROOT);
     if (file_exists(db3)) {
         if (BACKUP_FILES) {
-            char* db3_bak = join_str(db3, ".bak");
+            const char* db3_bak = join_str(db3, ".bak");
             if (!CopyFileExA(db3, db3_bak, NULL, NULL, NULL, 0)) {
                 _ERROR("Failed to backup komplete.db3");
                 return FALSE;
@@ -1236,8 +1191,8 @@ char* extract_tag_name(const char* json) {
     if (!value_end)
         return NULL;
 
-    size_t len = value_end - value_start;
-    char* tag  = strpool_alloc(len + 1);
+    const size_t len = value_end - value_start;
+    char* tag        = strpool_alloc(len + 1);
     strncpy_s(tag, len + 1, value_start, len);
     tag[len] = '\0';
 
@@ -1381,17 +1336,17 @@ cleanup:
 
 void check_for_updates(HWND hwnd, BOOL alert_up_to_date) {
     char* current_version = get_latest_version();
-    int compare           = compare_versions(current_version, VER_PRODUCTVERSION_STR);
+    const int compare     = compare_versions(current_version, VER_PRODUCTVERSION_STR);
 
     if (compare > 0) {
-        char* message = strpool_sprintf("A new version of K8-LRT is available!\n\n"
-                                        "Current: %s\n"
-                                        "Latest: %s\n\n"
-                                        "Visit the GitHub releases page to download?",
-                                        VER_PRODUCTVERSION_STR,
-                                        current_version + 1);
+        const char* message = strpool_sprintf("A new version of K8-LRT is available!\n\n"
+                                              "Current: %s\n"
+                                              "Latest: %s\n\n"
+                                              "Visit the GitHub releases page to download?",
+                                              VER_PRODUCTVERSION_STR,
+                                              current_version + 1);
 
-        int result = MessageBoxA(hwnd, message, "Update Available", MB_YESNO | MB_ICONINFORMATION);
+        const int result = MessageBoxA(hwnd, message, "Update Available", MB_YESNO | MB_ICONINFORMATION);
 
         if (result == IDYES) {
             ShellExecuteA(NULL,
@@ -1427,9 +1382,8 @@ BOOL open_folder_dialog(HWND owner, char* dst, int len) {
     IShellItem* pItem          = NULL;
     PWSTR pszFilePath          = NULL;
     BOOL success               = FALSE;
-    HRESULT hr;
 
-    hr = CoCreateInstance(&CLSID_FileOpenDialog, NULL, CLSCTX_ALL, &IID_IFileOpenDialog, (void**)&pFileOpen);
+    HRESULT hr = CoCreateInstance(&CLSID_FileOpenDialog, NULL, CLSCTX_ALL, &IID_IFileOpenDialog, (void**)&pFileOpen);
 
     if (SUCCEEDED(hr)) {
         DWORD dwOptions;
@@ -1462,9 +1416,11 @@ BOOL open_folder_dialog(HWND owner, char* dst, int len) {
     return success;
 }
 
+#pragma endregion
 //====================================================================//
 //                     -- UI HELPER FUNCTIONS --                      //
 //====================================================================//
+#pragma region ui helper functions
 
 void create_button(HWND* button, const char* label, int x, int y, int w, int h, HWND hwnd, int menu, BOOL disabled) {
     _ASSERT(button != NULL);
@@ -1563,9 +1519,11 @@ void create_menu_bar(HWND hwnd) {
     SetMenu(hwnd, h_menubar);
 }
 
+#pragma endregion
 //====================================================================//
 //                      -- DIALOG CALLBACKS --                        //
 //====================================================================//
+#pragma region dialog callbacks
 
 LRESULT CALLBACK log_viewer_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM lparam) {
     switch (umsg) {
@@ -1573,34 +1531,34 @@ LRESULT CALLBACK log_viewer_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM lpa
             HWND h_edit;
             create_edit(&h_edit, 0, 0, 0, 0, hwnd, IDC_LOGVIEW_EDIT, TRUE, TRUE);
 
-            HFONT h_font = CreateFont(14,
-                                      0,
-                                      0,
-                                      0,
-                                      FW_NORMAL,
-                                      FALSE,
-                                      FALSE,
-                                      FALSE,
-                                      DEFAULT_CHARSET,
-                                      OUT_DEFAULT_PRECIS,
-                                      CLIP_DEFAULT_PRECIS,
-                                      DEFAULT_QUALITY,
-                                      FIXED_PITCH | FF_MODERN,
-                                      "Consolas");
+            const HFONT h_font = CreateFont(14,
+                                            0,
+                                            0,
+                                            0,
+                                            FW_NORMAL,
+                                            FALSE,
+                                            FALSE,
+                                            FALSE,
+                                            DEFAULT_CHARSET,
+                                            OUT_DEFAULT_PRECIS,
+                                            CLIP_DEFAULT_PRECIS,
+                                            DEFAULT_QUALITY,
+                                            FIXED_PITCH | FF_MODERN,
+                                            "Consolas");
 
             SendMessage(h_edit, WM_SETFONT, (WPARAM)h_font, TRUE);
 
             if (LOG_FILE) {
-                int current_pos = ftell(LOG_FILE);
+                const int current_pos = ftell(LOG_FILE);
 
                 fseek(LOG_FILE, 0, SEEK_END);
-                int file_size = ftell(LOG_FILE);
+                const int file_size = ftell(LOG_FILE);
                 fseek(LOG_FILE, 0, SEEK_SET);
 
                 char* buffer = (char*)malloc(file_size + 1);
                 if (buffer) {
-                    size_t bytes_read  = fread(buffer, 1, file_size, LOG_FILE);
-                    buffer[bytes_read] = '\0';
+                    const size_t bytes_read = fread(buffer, 1, file_size, LOG_FILE);
+                    buffer[bytes_read]      = '\0';
 
                     // Convert LF to CRLF for Windows Edit control
                     size_t lf_count = 0;
@@ -1643,7 +1601,7 @@ LRESULT CALLBACK log_viewer_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM lpa
         }
 
         case WM_SIZE: {
-            HWND h_edit = GetDlgItem(hwnd, IDC_LOGVIEW_EDIT);
+            const HWND h_edit = GetDlgItem(hwnd, IDC_LOGVIEW_EDIT);
             if (h_edit) {
                 RECT rect;
                 GetClientRect(hwnd, &rect);
@@ -2013,9 +1971,11 @@ INT_PTR CALLBACK relocate_dialog_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARA
     return (INT_PTR)FALSE;
 }
 
+#pragma endregion
 //====================================================================//
 //                     -- WNDPROC CALLBACKS --                        //
 //====================================================================//
+#pragma region wndproc callbacks
 
 LRESULT on_create(HWND hwnd) {
     UI_FONT = CreateFont(16,
@@ -2071,7 +2031,7 @@ LRESULT on_create(HWND hwnd) {
 
 LRESULT on_show(HWND hwnd) {
     // Search registry for key entries in `HKEY_LOCAL_MACHINE/SOFTWARE/Native Instruments/..`
-    BOOL query_result = query_libraries(hwnd);
+    const BOOL query_result = query_libraries(hwnd);
     if (!query_result) {
         MessageBox(hwnd,
                    "Failed to query libraries. Do you have any Kontakt libraries installed?\n\nCheck "
@@ -2087,7 +2047,7 @@ LRESULT on_show(HWND hwnd) {
 }
 
 void on_selection_changed(HWND hwnd) {
-    int sel = (int)SendMessage(H_LISTBOX, LB_GETCURSEL, 0, 0);
+    const int sel = (int)SendMessage(H_LISTBOX, LB_GETCURSEL, 0, 0);
     if (sel != LB_ERR) {
         SELECTED_INDEX = sel;
     }
@@ -2105,22 +2065,22 @@ void on_remove_selected(HWND hwnd) {
       .remove_content_dir = REMOVE_CONTENT_DIR,
     };
 
-    INT_PTR result = DialogBoxParam(GetModuleHandle(NULL),
-                                    MAKEINTRESOURCE(IDD_REMOVE_LIBRARYBOX),
-                                    hwnd,
-                                    remove_library_dialog_proc,
-                                    (LPARAM)&data);
+    const INT_PTR result = DialogBoxParam(GetModuleHandle(NULL),
+                                          MAKEINTRESOURCE(IDD_REMOVE_LIBRARYBOX),
+                                          hwnd,
+                                          remove_library_dialog_proc,
+                                          (LPARAM)&data);
 
     if (result == IDREMOVE) {
         BACKUP_FILES       = data.backup_files;
         REMOVE_CONTENT_DIR = data.remove_content_dir;
 
-        BOOL removed = remove_selected_library();
+        const BOOL removed = remove_selected_library();
         if (!removed) {
             MessageBox(hwnd, "Failed to remove library. Check K8-LRT.log for details.", "Error", MB_OK | MB_ICONERROR);
             return;
         } else {
-            BOOL query_result = query_libraries(hwnd);
+            const BOOL query_result = query_libraries(hwnd);
             if (query_result) {
                 EnableWindow(H_REMOVE_BUTTON, FALSE);
                 MessageBox(hwnd, "Successfully removed library.", "Success", MB_OK | MB_ICONINFORMATION);
@@ -2145,7 +2105,7 @@ void on_remove_all(HWND hwnd) {
     BACKUP_FILES       = _IS_CHECKED(IDC_CHECKBOX_BACKUP);
     REMOVE_CONTENT_DIR = _IS_CHECKED(IDC_CHECKBOX_REMOVE_LIB_FOLDER);
 
-    BOOL* selected = _ALLOC_ARRAY(BOOL, LIB_COUNT);
+    BOOL* selected = (BOOL*)malloc(sizeof(BOOL) * LIB_COUNT);
     for (int i = 0; i < LIB_COUNT; i++) {
         selected[i] = TRUE;  // All selected by default
     }
@@ -2157,11 +2117,11 @@ void on_remove_all(HWND hwnd) {
                                              .remove_library_folder = REMOVE_CONTENT_DIR,
                                              .selected_count        = LIB_COUNT};
 
-    INT_PTR result = DialogBoxParam(GetModuleHandle(NULL),
-                                    MAKEINTRESOURCE(IDD_BATCH_REMOVEBOX),
-                                    hwnd,
-                                    batch_remove_dialog_proc,
-                                    (LPARAM)&dialog_data);
+    const INT_PTR result = DialogBoxParam(GetModuleHandle(NULL),
+                                          MAKEINTRESOURCE(IDD_BATCH_REMOVEBOX),
+                                          hwnd,
+                                          batch_remove_dialog_proc,
+                                          (LPARAM)&dialog_data);
 
     if (result == IDREMOVE_BATCH) {
         BACKUP_FILES       = dialog_data.backup_files;
@@ -2172,7 +2132,7 @@ void on_remove_all(HWND hwnd) {
 
         for (int i = 0; i < dialog_data.lib_count; i++) {
             if (dialog_data.selected[i]) {
-                BOOL removed = remove_library(&LIBRARIES[i], REMOVE_CONTENT_DIR);
+                const BOOL removed = remove_library(&LIBRARIES[i], REMOVE_CONTENT_DIR);
                 if (removed) {
                     removed_count++;
                 } else {
@@ -2182,7 +2142,7 @@ void on_remove_all(HWND hwnd) {
             }
         }
 
-        BOOL query_result = query_libraries(hwnd);
+        const BOOL query_result = query_libraries(hwnd);
 
         if (failed_count == 0) {
             MessageBox(hwnd,
@@ -2208,15 +2168,17 @@ void on_remove_all(HWND hwnd) {
         EnableWindow(H_REMOVE_BUTTON, FALSE);
         SELECTED_INDEX = -1;
     }
+
+    free(selected);
 }
 
 void on_relocate_selected(HWND hwnd) {
     relocate_lib_dialog_data data = {.library = &LIBRARIES[SELECTED_INDEX]};
-    INT_PTR result                = DialogBoxParam(GetModuleHandle(NULL),
-                                    MAKEINTRESOURCE(IDD_RELOCATE_LIBRARYBOX),
-                                    hwnd,
-                                    relocate_dialog_proc,
-                                    (LPARAM)&data);
+    const INT_PTR result          = DialogBoxParam(GetModuleHandle(NULL),
+                                          MAKEINTRESOURCE(IDD_RELOCATE_LIBRARYBOX),
+                                          hwnd,
+                                          relocate_dialog_proc,
+                                          (LPARAM)&data);
 
     if (result == IDRELOCATE_RELOCATE) {
         _INFO("Relocating library '%s'", data.library->name);
@@ -2226,7 +2188,7 @@ void on_relocate_selected(HWND hwnd) {
         const char* new_path_full = join_paths(data.new_path, data.library->name);
 
         if (!copy_directory(data.library->content_dir, new_path_full)) {
-            char* msg = strpool_sprintf("Failed to copy content directory to new location: '%s'", new_path_full);
+            const char* msg = strpool_sprintf("Failed to copy content directory to new location: '%s'", new_path_full);
             _ERROR(msg);
             MessageBox(hwnd, msg, "Error relocating library", MB_OK | MB_ICONERROR);
             return;
@@ -2241,8 +2203,8 @@ void on_relocate_selected(HWND hwnd) {
 
         HKEY regkey;
         const char* key_path = join_paths("SOFTWARE\\Native Instruments", data.library->name);
-        BOOL result          = open_regisry_key(&regkey, HKEY_LOCAL_MACHINE, key_path, KEY_SET_VALUE);
-        if (result) {
+        const BOOL open      = open_registry_key(&regkey, HKEY_LOCAL_MACHINE, key_path, KEY_SET_VALUE);
+        if (open) {
             if (!set_registry_value_str(regkey, "ContentDir", new_path_full)) {
                 close_registry_key(&regkey);
                 _ERROR("Failed to update ContentDir value in registry key");
@@ -2258,13 +2220,14 @@ void on_relocate_selected(HWND hwnd) {
         _INFO("Finished relocating library");
         MessageBox(hwnd, "Library has been successfully relocated", "Success", MB_OK | MB_ICONINFORMATION);
 
-        BOOL query_result = query_libraries(hwnd);
+        const BOOL query_result = query_libraries(hwnd);
         if (!query_result) {
             MessageBox(hwnd,
                        "Failed to query libraries.\n\nCheck 'K8-LRT.log' for details.",
                        "Error",
                        MB_OK | MB_ICONERROR);
         }
+
         SELECTED_INDEX = -1;
     }
 }
@@ -2317,10 +2280,10 @@ void on_view_log(HWND hwnd) {
 }
 
 void on_reload_libraries(HWND hwnd) {
-    int response =
+    const int response =
       MessageBox(hwnd, "Clear found libraries and search again?", "Confirm Reload", MB_YESNO | MB_ICONQUESTION);
     if (response == IDYES) {
-        BOOL query_result = query_libraries(hwnd);
+        const BOOL query_result = query_libraries(hwnd);
         if (!query_result) {
             MessageBox(hwnd, "Failed to query libraries. Are you admin?", "Error querying", MB_OK | MB_ICONERROR);
         }
@@ -2328,7 +2291,7 @@ void on_reload_libraries(HWND hwnd) {
 }
 
 void on_exit(HWND hwnd) {
-    int response = MessageBox(hwnd, "Are you sure you want exit?", "Confirm Exit", MB_YESNO | MB_ICONQUESTION);
+    const int response = MessageBox(hwnd, "Are you sure you want exit?", "Confirm Exit", MB_YESNO | MB_ICONQUESTION);
     if (response == IDYES) {
         PostQuitMessage(0);
     }
@@ -2339,9 +2302,11 @@ void on_about(HWND hwnd) {
     DialogBoxParam(GetModuleHandle(NULL), MAKEINTRESOURCE(IDD_ABOUTBOX), hwnd, about_dialog_proc, (LPARAM)version);
 }
 
+#pragma endregion
 //====================================================================//
 //                      -- WINDOW CALLBACK --                         //
 //====================================================================//
+#pragma region window callbacks
 
 LRESULT CALLBACK wnd_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM lparam) {
     switch (umsg) {
@@ -2434,6 +2399,8 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM lparam) {
     return DefWindowProc(hwnd, umsg, wparam, lparam);
 }
 
+#pragma endregion
+
 //====================================================================//
 //                         -- ENTRYPOINT --                           //
 //====================================================================//
@@ -2443,9 +2410,11 @@ int WINAPI WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_cmd
     attach_console();
 #endif
 
+    strpool_init();
+    enable_backup_privilege();
     log_init("K8-LRT.log");
 
-    HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    const HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     if (FAILED(hr))
         return 1;
 
@@ -2454,10 +2423,6 @@ int WINAPI WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_cmd
     icc.dwSize = sizeof(icc);
     icc.dwICC  = ICC_WIN95_CLASSES | ICC_STANDARD_CLASSES;
     InitCommonControlsEx(&icc);
-
-    arena_init(_PROGRAM_MEMORY);
-    strpool_init();
-    enable_backup_privilege();
 
     WNDCLASS wc      = {0};
     wc.lpfnWndProc   = wnd_proc;
@@ -2474,18 +2439,18 @@ int WINAPI WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_cmd
     const int win_x    = (screen_w - _WINDOW_W) / 2;
     const int win_y    = (screen_h - _WINDOW_H) / 2;
 
-    HWND hwnd = CreateWindowEx(0,
-                               _WINDOW_CLASS,
-                               _WINDOW_TITLE,
-                               WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-                               win_x,
-                               win_y,
-                               _WINDOW_W,
-                               _WINDOW_H,
-                               NULL,
-                               NULL,
-                               h_instance,
-                               NULL);
+    const HWND hwnd = CreateWindowEx(0,
+                                     _WINDOW_CLASS,
+                                     _WINDOW_TITLE,
+                                     WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+                                     win_x,
+                                     win_y,
+                                     _WINDOW_W,
+                                     _WINDOW_H,
+                                     NULL,
+                                     NULL,
+                                     h_instance,
+                                     NULL);
 
     if (hwnd == NULL)
         return 1;
@@ -2500,15 +2465,15 @@ int WINAPI WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_cmd
 
 #ifndef NDEBUG
     if (FreeConsole()) {
+        if (ATTACHED_TO_CONSOLE)
+            _LOG("Detached debug console");
         ATTACHED_TO_CONSOLE = FALSE;
-        _LOG("Detached debug console");
     }
 #endif
 
     CoUninitialize();
 
     log_close();
-    arena_destroy();
     strpool_destroy();
 
     return 0;
