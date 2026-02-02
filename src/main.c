@@ -1,5 +1,5 @@
 /*
-    K8-LRT - v2.0.0 - Library removal tool for Bobdule's Kontakt 8
+    K8-LRT - v2.1.0 - Library removal tool for Bobdule's Kontakt 8
 
     LICENSE
 
@@ -32,6 +32,7 @@
 
     REVISION HISTORY
 
+        2.1.0  (2026-02-01)  multi-threading, progress indicator
         2.0.0  (2026-01-31)  bug fixes for registry querying, relocating libraries,
                              removed support for Windows 7, string pool
                              memory management, wide path support
@@ -65,6 +66,7 @@
 //===================================================================//
 //                          -- LOGGING --                            //
 //===================================================================//
+
 #pragma region logging
 
 typedef enum {
@@ -169,9 +171,11 @@ void log_close(void) {
 #define _LOG(fmt, ...) log_msg(LOG_DEBUG, fmt, ##__VA_ARGS__)
 
 #pragma endregion
+
 //===================================================================//
 //                           -- MEMORY --                            //
 //===================================================================//
+
 #pragma region memory
 
 #define INITIAL_STRPOOL_CAPACITY 16
@@ -379,9 +383,11 @@ void strpool_reset(void) {
 }
 
 #pragma endregion
+
 //===================================================================//
 //                           -- STATE --                             //
 //===================================================================//
+
 #pragma region state
 
 #define WM_IO_PROGRESS (WM_USER + 100)
@@ -468,9 +474,11 @@ void io_state_request_cancel(void) {
 }
 
 #pragma endregion
+
 //===================================================================//
 //                   -- UI ELEMENT DEFINITIONS --                    //
 //===================================================================//
+
 #pragma region ui element definitions
 
 #include "resource.h"
@@ -491,9 +499,11 @@ static HWND H_PROGRESS_CANCEL_BUTTON     = NULL;
 static HFONT UI_FONT = NULL;
 
 #pragma endregion
+
 //===================================================================//
 //                          -- GLOBALS --                            //
 //===================================================================//
+
 #pragma region globals
 
 #define _WINDOW_W 300
@@ -610,9 +620,11 @@ static char* KEY_EXCLUSION_PATTERNS[KEY_EXCLUSION_PATTERNS_SIZE] = {
 };
 
 #pragma endregion
+
 //===================================================================//
 //                     -- PROGRESS REPORTING --                      //
 //===================================================================//
+
 #pragma region progress reporting
 
 typedef struct {
@@ -680,9 +692,11 @@ void report_error(HWND hwnd, const wchar_t* msg) {
 }
 
 #pragma endregion
+
 //===================================================================//
 //                      -- HELPER FUNCTIONS --                       //
 //===================================================================//
+
 #pragma region helper functions
 
 #ifndef NDEBUG
@@ -1573,9 +1587,11 @@ BOOL open_folder_dialog(HWND owner, char* dst, int len) {
 }
 
 #pragma endregion
+
 //===================================================================//
 //                     -- THREADED OPERATIONS --                     //
 //===================================================================//
+
 #pragma region threaded operations
 
 BOOL thread_check_cancel_and_progress(
@@ -1781,9 +1797,11 @@ void start_test_operation(HWND hwnd) {
 }
 
 #pragma endregion
+
 //===================================================================//
 //                     -- UI HELPER FUNCTIONS --                     //
 //===================================================================//
+
 #pragma region ui helper functions
 
 void create_button(HWND* button, const char* label, int x, int y, int w, int h, HWND hwnd, int menu, BOOL disabled) {
@@ -1883,6 +1901,46 @@ void create_menu_bar(HWND hwnd) {
     SetMenu(hwnd, h_menubar);
 }
 
+LRESULT CALLBACK
+progress_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam, UINT_PTR id_subclass, DWORD_PTR ref_data) {
+    switch (msg) {
+        case WM_ERASEBKGND: {
+            HDC hdc = (HDC)wparam;
+            RECT rect;
+            GetClientRect(hwnd, &rect);
+            HBRUSH brush = CreateSolidBrush(RGB(245, 245, 245));
+            FillRect(hdc, &rect, brush);
+            DeleteObject(brush);
+            return 1;
+        }
+
+        case WM_COMMAND: {
+            switch (LOWORD(wparam)) {
+                case IDC_PROGRESS_CANCEL_BUTTON: {
+                    const int response = MessageBox(hwnd,
+                                                    "Are you sure you want to cancel the current operation?",
+                                                    "Cancel",
+                                                    MB_YESNO | MB_DEFBUTTON2 | MB_ICONQUESTION);
+                    if (response == IDYES) {
+                        if (io_state_is_busy()) {
+                            io_state_request_cancel();
+
+                            if (IO_STATE.thread_handle) {
+                                WaitForSingleObject(IO_STATE.thread_handle, 2000);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        case WM_NCDESTROY:
+            RemoveWindowSubclass(hwnd, progress_proc, id_subclass);
+            break;
+    }
+    return DefSubclassProc(hwnd, msg, wparam, lparam);
+}
+
 void create_progress_panel(HWND hwnd) {
     const int panel_w = _WINDOW_W;
     const int panel_h = 80;
@@ -1901,6 +1959,7 @@ void create_progress_panel(HWND hwnd) {
                                       (HMENU)IDC_PROGRESS_PANEL,
                                       GetModuleHandle(NULL),
                                       NULL);
+    SetWindowSubclass(H_PROGRESS_PANEL, progress_proc, 0, 0);
 
     H_PROGRESS_TEXT = CreateWindowEx(0,
                                      "STATIC",
@@ -1971,9 +2030,11 @@ void hide_progress_panel(HWND hwnd) {
 }
 
 #pragma endregion
+
 //===================================================================//
 //                      -- DIALOG CALLBACKS --                       //
 //===================================================================//
+
 #pragma region dialog callbacks
 
 LRESULT CALLBACK log_viewer_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM lparam) {
@@ -2423,9 +2484,11 @@ INT_PTR CALLBACK relocate_dialog_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARA
 }
 
 #pragma endregion
+
 //===================================================================//
 //                     -- WNDPROC CALLBACKS --                       //
 //===================================================================//
+
 #pragma region wndproc callbacks
 
 LRESULT on_create(HWND hwnd) {
@@ -2671,9 +2734,11 @@ void on_about(HWND hwnd) {
 }
 
 #pragma endregion
+
 //===================================================================//
-//                      -- WINDOW CALLBACK --                        //
+//                      -- WINDOW CALLBACKS --                       //
 //===================================================================//
+
 #pragma region window callbacks
 
 LRESULT CALLBACK wnd_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM lparam) {
