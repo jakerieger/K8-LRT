@@ -45,6 +45,8 @@
 
 #include "version.h"
 
+#define _CRT_SECURE_NO_WARNINGS 1
+
 #include <stdio.h>
 #include <stdarg.h>
 #include <windows.h>   // Core Windows API
@@ -58,6 +60,7 @@
 #include <winhttp.h>   // For checking for updates
 #include <pathcch.h>   // For long path support and newer file API (Windows 8+)
 #include <strsafe.h>   // Window API safer string handling
+#include <process.h>   // Threading
 
 //===================================================================//
 //                          -- LOGGING --                            //
@@ -377,6 +380,95 @@ void strpool_reset(void) {
 
 #pragma endregion
 //===================================================================//
+//                           -- STATE --                             //
+//===================================================================//
+#pragma region state
+
+#define WM_IO_PROGRESS (WM_USER + 100)
+#define WM_IO_COMPLETE (WM_USER + 101)
+#define WM_IO_ERROR (WM_USER + 102)
+
+typedef enum {
+    IO_STATE_IDLE = 0,
+    IO_STATE_REMOVING,
+    IO_STATE_COPYING,
+    IO_STATE_RELOCATING,
+} io_operation_state;
+
+typedef struct {
+    io_operation_state state;
+    CRITICAL_SECTION cs;
+    HWND main_window;
+    HANDLE thread_handle;
+    volatile BOOL cancel_requested;
+} io_state_manager;
+
+static io_state_manager IO_STATE = {0};
+
+void io_state_init(HWND hwnd) {
+    IO_STATE.state         = IO_STATE_IDLE;
+    IO_STATE.main_window   = hwnd;
+    IO_STATE.thread_handle = NULL;
+    InitializeCriticalSection(&IO_STATE.cs);
+}
+
+void io_state_cleanup(void) {
+    DeleteCriticalSection(&IO_STATE.cs);
+}
+
+BOOL io_state_is_busy(void) {
+    // ReSharper disable once CppJoinDeclarationAndAssignment
+    BOOL busy;
+    EnterCriticalSection(&IO_STATE.cs);
+    busy = (IO_STATE.state != IO_STATE_IDLE);
+    LeaveCriticalSection(&IO_STATE.cs);
+    return busy;
+}
+
+BOOL io_state_try_begin(io_operation_state new_state) {
+    BOOL success = FALSE;
+    EnterCriticalSection(&IO_STATE.cs);
+    if (IO_STATE.state == IO_STATE_IDLE) {
+        IO_STATE.state            = new_state;
+        IO_STATE.cancel_requested = FALSE;
+        success                   = TRUE;
+    }
+    LeaveCriticalSection(&IO_STATE.cs);
+    return success;
+}
+
+void io_state_end(void) {
+    EnterCriticalSection(&IO_STATE.cs);
+    IO_STATE.state = IO_STATE_IDLE;
+    if (IO_STATE.thread_handle) {
+        CloseHandle(IO_STATE.thread_handle);
+        IO_STATE.thread_handle = NULL;
+    }
+    LeaveCriticalSection(&IO_STATE.cs);
+}
+
+void io_state_set_thread(HANDLE thread) {
+    EnterCriticalSection(&IO_STATE.cs);
+    IO_STATE.thread_handle = thread;
+    LeaveCriticalSection(&IO_STATE.cs);
+}
+
+BOOL io_state_should_cancel(void) {
+    BOOL cancel;
+    EnterCriticalSection(&IO_STATE.cs);
+    cancel = IO_STATE.cancel_requested;
+    LeaveCriticalSection(&IO_STATE.cs);
+    return cancel;
+}
+
+void io_state_request_cancel(void) {
+    EnterCriticalSection(&IO_STATE.cs);
+    IO_STATE.cancel_requested = TRUE;
+    LeaveCriticalSection(&IO_STATE.cs);
+}
+
+#pragma endregion
+//===================================================================//
 //                   -- UI ELEMENT DEFINITIONS --                    //
 //===================================================================//
 #pragma region ui element definitions
@@ -386,11 +478,15 @@ void strpool_reset(void) {
 static HWND H_LISTBOX                    = NULL;
 static HWND H_REMOVE_BUTTON              = NULL;
 static HWND H_REMOVE_ALL_BUTTON          = NULL;
-static HWND H_BACKUP_CHECKBOX            = NULL;  // Whether or not we should backup delete filesa
+static HWND H_BACKUP_CHECKBOX            = NULL;
 static HWND H_LOG_VIEWER                 = NULL;
 static HWND H_REMOVE_LIB_FOLDER_CHECKBOX = NULL;
 static HWND H_SELECT_LIB_LABEL           = NULL;
 static HWND H_RELOCATE_BUTTON            = NULL;
+static HWND H_PROGRESS_BAR               = NULL;
+static HWND H_PROGRESS_TEXT              = NULL;
+static HWND H_PROGRESS_PANEL             = NULL;
+static HWND H_PROGRESS_CANCEL_BUTTON     = NULL;
 
 static HFONT UI_FONT = NULL;
 
@@ -512,6 +608,76 @@ static char* KEY_EXCLUSION_PATTERNS[KEY_EXCLUSION_PATTERNS_SIZE] = {
   "u-he*",
   "Waves*",
 };
+
+#pragma endregion
+//===================================================================//
+//                     -- PROGRESS REPORTING --                      //
+//===================================================================//
+#pragma region progress reporting
+
+typedef struct {
+    DWORD last_update_time;
+    int last_update_percent;
+} progress_throttle_state;
+
+void throttle_init(progress_throttle_state* state) {
+    state->last_update_time    = GetTickCount();
+    state->last_update_percent = -1;
+}
+
+BOOL throttle_should_update(progress_throttle_state* state, int current, int total) {
+    const DWORD now        = GetTickCount();
+    const DWORD elapsed_ms = now - state->last_update_time;
+    const int percent      = total > 0 ? (int)((current * 100.0) / total) : 0;
+    // Update if:
+    // 1. At least 50ms has passed AND percentage changed, OR
+    // 2. At least 200ms has passed (even if percentage didn't change)
+    const BOOL time_threshold = (elapsed_ms >= 50 && percent != state->last_update_percent) || (elapsed_ms >= 200);
+    if (time_threshold) {
+        state->last_update_time    = now;
+        state->last_update_percent = percent;
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+typedef struct {
+    int current;
+    int total;
+    wchar_t message[256];
+} progress_data;
+
+void report_progress(HWND hwnd, int current, int total, const wchar_t* msg) {
+    progress_data* data = (progress_data*)malloc(sizeof(progress_data));
+    if (data) {
+        data->current = current;
+        data->total   = total;
+        if (msg) {
+            wcsncpy(data->message, msg, 255);
+            data->message[255] = L'\0';
+        } else {
+            data->message[0] = L'\0';
+        }
+        PostMessage(hwnd, WM_IO_PROGRESS, 0, (LPARAM)data);
+    }
+}
+
+void report_complete(HWND hwnd, BOOL success, const wchar_t* msg) {
+    wchar_t* message = NULL;
+    if (msg) {
+        message = _wcsdup(msg);
+    }
+    PostMessage(hwnd, WM_IO_COMPLETE, (WPARAM)success, (LPARAM)msg);
+}
+
+void report_error(HWND hwnd, const wchar_t* msg) {
+    wchar_t* message = NULL;
+    if (msg) {
+        message = _wcsdup(msg);
+    }
+    PostMessage(hwnd, WM_IO_ERROR, 0, (LPARAM)msg);
+}
 
 #pragma endregion
 //===================================================================//
@@ -1408,6 +1574,214 @@ BOOL open_folder_dialog(HWND owner, char* dst, int len) {
 
 #pragma endregion
 //===================================================================//
+//                     -- THREADED OPERATIONS --                     //
+//===================================================================//
+#pragma region threaded operations
+
+BOOL thread_check_cancel_and_progress(
+  HWND hwnd, progress_throttle_state* state, int current, int total, const wchar_t* msg) {
+    if (io_state_should_cancel())
+        return FALSE;
+    if (throttle_should_update(state, current, total))
+        report_progress(hwnd, current, total, msg);
+    return TRUE;
+}
+
+typedef struct {
+    HWND hwnd;
+    library_entry* libraries;
+    size_t lib_count;
+    BOOL backup_cache;
+    BOOL remove_content;
+} remove_thread_params;
+
+typedef struct {
+    HWND hwnd;
+    library_entry* library;
+    const char* new_path;
+} relocate_thread_params;
+
+typedef struct {
+    HWND hwnd;
+} thread_params;
+
+UINT __stdcall remove_worker_thread(void* param) {
+    remove_thread_params* params = (remove_thread_params*)param;
+
+    if (params->lib_count > 1) {
+        // Remove multiple libraries
+        for (int i = 0; i < params->lib_count; i++) {
+            wchar_t msg[256];
+            swprintf(msg, 256, L"Removing library %zu of %zu...", i + 1, params->lib_count);
+            report_progress(params->hwnd, (int)i, (int)params->lib_count, msg);
+
+            const BOOL removed = remove_library(params->libraries + i, params->remove_content);
+            if (!removed) {
+                report_error(params->hwnd, L"Failed to remove library");
+            }
+        }
+
+        report_complete(params->hwnd, TRUE, L"Libraries removed successfully");
+    } else {
+        // Remove single library
+        report_progress(params->hwnd, 0, 1, L"Removing selected library...");
+
+        const BOOL removed = remove_library(params->libraries, params->remove_content);
+        if (!removed) {
+            report_error(params->hwnd, L"Failed to remove library");
+        }
+
+        report_complete(params->hwnd, TRUE, L"Library removed successfully");
+    }
+
+    free(params);
+    io_state_end();
+
+    return 0;
+}
+
+UINT __stdcall relocate_worker_thread(void* param) {
+    relocate_thread_params* params = (relocate_thread_params*)param;
+
+    report_progress(params->hwnd, 0, 1, L"Relocating library...");
+
+    const char* new_path_full = join_paths(params->new_path, params->library->name);
+
+    if (!copy_directory(params->library->content_dir, new_path_full)) {
+        report_error(params->hwnd, L"Failed to copy original content directory to new location");
+    }
+
+    if (!rm_rf(make_long_path(params->library->content_dir))) {
+        report_error(params->hwnd, L"Failed to delete original content directory");
+    }
+
+    HKEY regkey;
+    const char* key_path = join_paths("SOFTWARE\\Native Instruments", params->library->name);
+    const BOOL open      = open_registry_key(&regkey, HKEY_LOCAL_MACHINE, key_path, KEY_SET_VALUE);
+    if (open) {
+        if (!set_registry_value_str(regkey, "ContentDir", new_path_full)) {
+            report_error(params->hwnd, L"Failed to update registry ContentDir value");
+        }
+    }
+    close_registry_key(&regkey);
+
+    report_complete(params->hwnd, TRUE, L"Library relocated successfully");
+    free(params);
+
+    io_state_end();
+    return 0;
+}
+
+UINT __stdcall test_worker_thread(void* param) {
+    thread_params* params = (thread_params*)param;
+
+    progress_throttle_state throttle;
+    throttle_init(&throttle);
+
+    const int total = 1e6;
+    for (int i = 0; i < total; i++) {
+        if (!thread_check_cancel_and_progress(params->hwnd, &throttle, i, total, L"Processing...")) {
+            report_complete(params->hwnd, FALSE, L"Operation cancelled");
+            free(params);
+            io_state_end();
+            return 1;
+        }
+
+        printf("%d\n", i);
+    }
+
+    report_progress(params->hwnd, total, total, L"Complete!");
+    report_complete(params->hwnd, TRUE, L"Test finished successfully!");
+
+    free(params);
+    io_state_end();
+
+    return 0;
+}
+
+void start_remove_operation(HWND hwnd, library_entry* libs, size_t lib_count, BOOL backup, BOOL remove_content) {
+    if (!io_state_try_begin(IO_STATE_REMOVING)) {
+        MessageBox(hwnd, "Another operation is in progress. Please wait...", "Busy", MB_OK | MB_ICONWARNING);
+        return;
+    }
+
+    remove_thread_params* params = malloc(sizeof(remove_thread_params));
+    if (!params) {
+        io_state_end();
+        MessageBox(hwnd, "Failed to allocate memory for operation", "Error", MB_OK | MB_ICONERROR);
+        return;
+    }
+
+    params->hwnd           = hwnd;
+    params->libraries      = libs;
+    params->lib_count      = lib_count;
+    params->remove_content = remove_content;
+    params->backup_cache   = backup;
+
+    const HANDLE thread = (HANDLE)_beginthreadex(NULL, 0, remove_worker_thread, params, 0, NULL);
+    if (thread) {
+        io_state_set_thread(thread);
+    } else {
+        free(params);
+        io_state_end();
+        MessageBox(hwnd, "Failed to start operation thread", "Error", MB_OK | MB_ICONERROR);
+    }
+}
+
+void start_relocate_operation(HWND hwnd, library_entry* lib, const char* new_path) {
+    if (!io_state_try_begin(IO_STATE_RELOCATING)) {
+        MessageBox(hwnd, "Another operation is in progress. Please wait...", "Busy", MB_OK | MB_ICONWARNING);
+        return;
+    }
+
+    relocate_thread_params* params = malloc(sizeof(relocate_thread_params));
+    if (!params) {
+        io_state_end();
+        MessageBox(hwnd, "Failed to allocate memory for operation", "Error", MB_OK | MB_ICONERROR);
+        return;
+    }
+
+    params->hwnd     = hwnd;
+    params->library  = lib;
+    params->new_path = new_path;
+
+    const HANDLE thread = (HANDLE)_beginthreadex(NULL, 0, relocate_worker_thread, params, 0, NULL);
+    if (thread) {
+        io_state_set_thread(thread);
+    } else {
+        free(params);
+        io_state_end();
+        MessageBox(hwnd, "Failed to start operation thread", "Error", MB_OK | MB_ICONERROR);
+    }
+}
+
+void start_test_operation(HWND hwnd) {
+    if (!io_state_try_begin(IO_STATE_RELOCATING)) {
+        MessageBox(hwnd, "Another operation is in progress. Please wait...", "Busy", MB_OK | MB_ICONWARNING);
+        return;
+    }
+
+    thread_params* params = malloc(sizeof(thread_params));
+    if (!params) {
+        io_state_end();
+        MessageBox(hwnd, "Failed to allocate memory for operation", "Error", MB_OK | MB_ICONERROR);
+        return;
+    }
+
+    params->hwnd = hwnd;
+
+    const HANDLE thread = (HANDLE)_beginthreadex(NULL, 0, test_worker_thread, params, 0, NULL);
+    if (thread) {
+        io_state_set_thread(thread);
+    } else {
+        free(params);
+        io_state_end();
+        MessageBox(hwnd, "Failed to start operation thread", "Error", MB_OK | MB_ICONERROR);
+    }
+}
+
+#pragma endregion
+//===================================================================//
 //                     -- UI HELPER FUNCTIONS --                     //
 //===================================================================//
 #pragma region ui helper functions
@@ -1507,6 +1881,93 @@ void create_menu_bar(HWND hwnd) {
 
     AppendMenu(h_menubar, MF_POPUP, (UINT_PTR)h_menu, "&Menu");
     SetMenu(hwnd, h_menubar);
+}
+
+void create_progress_panel(HWND hwnd) {
+    const int panel_w = _WINDOW_W;
+    const int panel_h = 80;
+    const int panel_x = 0;
+    const int panel_y = _WINDOW_H - ((panel_h * 2) - 20);
+
+    H_PROGRESS_PANEL = CreateWindowEx(WS_EX_STATICEDGE,
+                                      "STATIC",
+                                      "",
+                                      WS_CHILD | SS_NOTIFY,
+                                      panel_x,
+                                      panel_y,
+                                      panel_w,
+                                      panel_h,
+                                      hwnd,
+                                      (HMENU)IDC_PROGRESS_PANEL,
+                                      GetModuleHandle(NULL),
+                                      NULL);
+
+    H_PROGRESS_TEXT = CreateWindowEx(0,
+                                     "STATIC",
+                                     "",
+                                     WS_CHILD | SS_LEFT,
+                                     10,
+                                     15,
+                                     panel_w / 2,
+                                     20,
+                                     H_PROGRESS_PANEL,
+                                     (HMENU)IDC_PROGRESS_TEXT,
+                                     GetModuleHandle(NULL),
+                                     NULL);
+
+    H_PROGRESS_CANCEL_BUTTON = CreateWindowEx(0,
+                                              "BUTTON",
+                                              "Cancel",
+                                              WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                              panel_w - 90,
+                                              10,
+                                              60,
+                                              25,
+                                              H_PROGRESS_PANEL,
+                                              (HMENU)IDC_PROGRESS_CANCEL_BUTTON,
+                                              GetModuleHandle(NULL),
+                                              NULL);
+
+    H_PROGRESS_BAR = CreateWindowEx(0,
+                                    PROGRESS_CLASS,
+                                    NULL,
+                                    WS_CHILD | PBS_SMOOTH,
+                                    10,
+                                    40,
+                                    panel_w - 40,
+                                    25,
+                                    H_PROGRESS_PANEL,
+                                    (HMENU)IDC_PROGRESS_BAR,
+                                    GetModuleHandle(NULL),
+                                    NULL);
+
+    SendMessage(H_PROGRESS_TEXT, WM_SETFONT, (WPARAM)UI_FONT, TRUE);
+    SendMessage(H_PROGRESS_CANCEL_BUTTON, WM_SETFONT, (WPARAM)UI_FONT, TRUE);
+    ShowWindow(H_PROGRESS_PANEL, SW_HIDE);
+}
+
+void show_progress_panel(HWND hwnd) {
+    ShowWindow(H_PROGRESS_PANEL, SW_SHOW);
+    ShowWindow(H_PROGRESS_BAR, SW_SHOW);
+    ShowWindow(H_PROGRESS_TEXT, SW_SHOW);
+
+    ShowWindow(H_BACKUP_CHECKBOX, SW_HIDE);
+    ShowWindow(H_REMOVE_LIB_FOLDER_CHECKBOX, SW_HIDE);
+    ShowWindow(H_REMOVE_ALL_BUTTON, SW_HIDE);
+    ShowWindow(H_REMOVE_BUTTON, SW_HIDE);
+    ShowWindow(H_RELOCATE_BUTTON, SW_HIDE);
+}
+
+void hide_progress_panel(HWND hwnd) {
+    ShowWindow(H_PROGRESS_PANEL, SW_HIDE);
+    ShowWindow(H_PROGRESS_BAR, SW_HIDE);
+    ShowWindow(H_PROGRESS_TEXT, SW_HIDE);
+
+    ShowWindow(H_BACKUP_CHECKBOX, SW_SHOW);
+    ShowWindow(H_REMOVE_LIB_FOLDER_CHECKBOX, SW_SHOW);
+    ShowWindow(H_REMOVE_ALL_BUTTON, SW_SHOW);
+    ShowWindow(H_REMOVE_BUTTON, SW_SHOW);
+    ShowWindow(H_RELOCATE_BUTTON, SW_SHOW);
 }
 
 #pragma endregion
@@ -1968,6 +2429,8 @@ INT_PTR CALLBACK relocate_dialog_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARA
 #pragma region wndproc callbacks
 
 LRESULT on_create(HWND hwnd) {
+    io_state_init(hwnd);
+
     UI_FONT = CreateFont(16,
                          0,
                          0,
@@ -2015,6 +2478,8 @@ LRESULT on_create(HWND hwnd) {
     create_button(&H_REMOVE_ALL_BUTTON, "Remove All...", 10, 312, 131, 30, hwnd, IDC_REMOVE_ALL_BUTTON, FALSE);
     create_button(&H_REMOVE_BUTTON, "Remove Selected", 145, 312, 131, 30, hwnd, IDC_REMOVE_BUTTON, TRUE);
     create_button(&H_RELOCATE_BUTTON, "Relocate Selected", 10, 346, 266, 26, hwnd, IDC_RELOCATE_BUTTON, TRUE);
+
+    create_progress_panel(hwnd);
 
     return 0;
 }
@@ -2064,29 +2529,15 @@ void on_remove_selected(HWND hwnd) {
     if (result == IDREMOVE) {
         BACKUP_FILES       = data.backup_files;
         REMOVE_CONTENT_DIR = data.remove_content_dir;
-
-        const BOOL removed = remove_selected_library();
-        if (!removed) {
-            MessageBox(hwnd, "Failed to remove library. Check K8-LRT.log for details.", "Error", MB_OK | MB_ICONERROR);
-            return;
-        } else {
-            const BOOL query_result = query_libraries(hwnd);
-            if (query_result) {
-                EnableWindow(H_REMOVE_BUTTON, FALSE);
-                MessageBox(hwnd, "Successfully removed library.", "Success", MB_OK | MB_ICONINFORMATION);
-            } else {
-                MessageBox(hwnd,
-                           "Failed to query libraries. Do you have any Kontakt libraries "
-                           "installed?\n\nCheck 'K8-LRT.log' for details.",
-                           "Error",
-                           MB_OK | MB_ICONERROR);
-                PostQuitMessage(0);
-            }
-        }
+        library_entry* lib = &LIBRARIES[SELECTED_INDEX];
+        start_remove_operation(hwnd, lib, 1, BACKUP_FILES, REMOVE_CONTENT_DIR);
     }
 }
 
 void on_remove_all(HWND hwnd) {
+    start_test_operation(hwnd);
+    return;
+
     if (LIB_COUNT == 0) {
         MessageBox(hwnd, "No libraries found to remove.", "No Libraries", MB_OK | MB_ICONINFORMATION);
         return;
@@ -2117,46 +2568,16 @@ void on_remove_all(HWND hwnd) {
         BACKUP_FILES       = dialog_data.backup_files;
         REMOVE_CONTENT_DIR = dialog_data.remove_library_folder;
 
-        int removed_count = 0;
-        int failed_count  = 0;
+        int selected_count = 0;
+        library_entry libs[_MAX_LIB_COUNT];
 
         for (int i = 0; i < dialog_data.lib_count; i++) {
             if (dialog_data.selected[i]) {
-                const BOOL removed = remove_library(&LIBRARIES[i], REMOVE_CONTENT_DIR);
-                if (removed) {
-                    removed_count++;
-                } else {
-                    failed_count++;
-                    _ERROR("Failed to remove library: '%s'", LIBRARIES[i]);
-                }
+                libs[selected_count++] = dialog_data.libraries[i];
             }
         }
 
-        const BOOL query_result = query_libraries(hwnd);
-
-        if (failed_count == 0) {
-            MessageBox(hwnd,
-                       strpool_sprintf("Successfully removed %d library(ies).", removed_count),
-                       "Success",
-                       MB_OK | MB_ICONINFORMATION);
-        } else {
-            MessageBox(hwnd,
-                       strpool_sprintf("Removed %d library(ies).\n%d failed.\n\nCheck K8-LRT.log for details.",
-                                       removed_count,
-                                       failed_count),
-                       "Partial Success",
-                       MB_OK | MB_ICONWARNING);
-        }
-
-        if (!query_result) {
-            MessageBox(hwnd,
-                       "Failed to query libraries.\n\nCheck 'K8-LRT.log' for details.",
-                       "Error",
-                       MB_OK | MB_ICONERROR);
-        }
-
-        EnableWindow(H_REMOVE_BUTTON, FALSE);
-        SELECTED_INDEX = -1;
+        start_remove_operation(hwnd, libs, selected_count, BACKUP_FILES, REMOVE_CONTENT_DIR);
     }
 
     free(selected);
@@ -2175,50 +2596,7 @@ void on_relocate_selected(HWND hwnd) {
         _INFO("Old Path: %s", data.library->content_dir);
         _INFO("New Path: %s", data.new_path);
 
-        const char* new_path_full = join_paths(data.new_path, data.library->name);
-
-        if (!copy_directory(data.library->content_dir, new_path_full)) {
-            const char* msg = strpool_sprintf("Failed to copy content directory to new location: '%s'", new_path_full);
-            _ERROR(msg);
-            MessageBox(hwnd, msg, "Error relocating library", MB_OK | MB_ICONERROR);
-            return;
-        }
-
-        if (!rm_rf(make_long_path(data.library->content_dir))) {
-            _WARN(
-              "Library (%s) was copied to new location but K8-LRT was unable to delete the original library content "
-              "directory.",
-              data.library->name);
-        }
-
-        HKEY regkey;
-        const char* key_path = join_paths("SOFTWARE\\Native Instruments", data.library->name);
-        const BOOL open      = open_registry_key(&regkey, HKEY_LOCAL_MACHINE, key_path, KEY_SET_VALUE);
-        if (open) {
-            if (!set_registry_value_str(regkey, "ContentDir", new_path_full)) {
-                close_registry_key(&regkey);
-                _ERROR("Failed to update ContentDir value in registry key");
-                MessageBox(hwnd,
-                           "Failed to update ContentDir value in registry key",
-                           "Error relocating library",
-                           MB_OK | MB_ICONERROR);
-                return;
-            }
-        }
-        close_registry_key(&regkey);
-
-        _INFO("Finished relocating library");
-        MessageBox(hwnd, "Library has been successfully relocated", "Success", MB_OK | MB_ICONINFORMATION);
-
-        const BOOL query_result = query_libraries(hwnd);
-        if (!query_result) {
-            MessageBox(hwnd,
-                       "Failed to query libraries.\n\nCheck 'K8-LRT.log' for details.",
-                       "Error",
-                       MB_OK | MB_ICONERROR);
-        }
-
-        SELECTED_INDEX = -1;
+        start_relocate_operation(hwnd, &LIBRARIES[SELECTED_INDEX], data.new_path);
     }
 }
 
@@ -2315,7 +2693,31 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM lparam) {
         }
 
         case WM_CTLCOLORSTATIC: {
-            HDC hdc = (HDC)wparam;
+            HDC hdc      = (HDC)wparam;
+            HWND control = (HWND)lparam;
+
+            // Panel background
+            if (control == H_PROGRESS_PANEL) {
+                SetBkColor(hdc, RGB(245, 245, 245));  // Light gray
+                static HBRUSH panel_brush = NULL;
+                if (!panel_brush) {
+                    panel_brush = CreateSolidBrush(RGB(245, 245, 245));
+                }
+                return (LRESULT)panel_brush;
+            }
+
+            // Text background (match panel)
+            if (control == H_PROGRESS_TEXT) {
+                SetBkColor(hdc, RGB(245, 245, 245));
+                SetTextColor(hdc, RGB(50, 50, 50));  // Dark text
+                static HBRUSH text_brush = NULL;
+                if (!text_brush) {
+                    text_brush = CreateSolidBrush(RGB(245, 245, 245));
+                }
+                return (LRESULT)text_brush;
+            }
+
+            // Default for other controls
             SetBkMode(hdc, TRANSPARENT);
             return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
         }
@@ -2324,6 +2726,80 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM lparam) {
             HDC hdc = (HDC)wparam;
             SetBkColor(hdc, GetSysColor(COLOR_WINDOW));
             return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
+        }
+
+        case WM_IO_PROGRESS: {
+            progress_data* data = (progress_data*)lparam;
+            if (data) {
+                int percent = 0;
+                if (data->total > 0) {
+                    percent = (int)((data->current * 100.0) / data->total);
+                    if (percent > 100)
+                        percent = 100;
+                }
+
+                // Set range to 0-100 (always safe for 16-bit)
+                SendMessage(H_PROGRESS_BAR, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
+                SendMessage(H_PROGRESS_BAR, PBM_SETPOS, percent, 0);
+
+                wchar_t status_text[512];
+                if (data->message[0] != L'\0') {
+                    swprintf(status_text, 512, L"%s (%d%%)", data->message, percent);
+                } else {
+                    swprintf(status_text, 512, L"Progress: %d%%", percent);
+                }
+                SetWindowTextW(H_PROGRESS_TEXT, status_text);
+
+                show_progress_panel(hwnd);
+
+                free(data);
+            }
+            return 0;
+        }
+
+        case WM_IO_COMPLETE: {
+            BOOL success     = (BOOL)wparam;
+            wchar_t* message = (wchar_t*)lparam;
+
+            hide_progress_panel(hwnd);
+
+            // Reset progress bar
+            SendMessage(H_PROGRESS_BAR, PBM_SETPOS, 0, 0);
+            SetWindowTextW(H_PROGRESS_TEXT, L"");
+
+            // Show completion message
+            if (message) {
+                MessageBoxW(hwnd,
+                            message,
+                            success ? L"Success" : L"Operation Complete",
+                            MB_OK | (success ? MB_ICONINFORMATION : MB_ICONWARNING));
+            }
+
+            SELECTED_INDEX          = -1;
+            const BOOL query_result = query_libraries(hwnd);
+            if (!query_result) {
+                _FATAL("Failed to query libraries. See 'K8-LRT.log' for more details.");
+            }
+
+            return 0;
+        }
+
+        case WM_IO_ERROR: {
+            wchar_t* error_message = (wchar_t*)lparam;
+
+            hide_progress_panel(hwnd);
+
+            SendMessage(H_PROGRESS_BAR, PBM_SETPOS, 0, 0);
+            SetWindowTextW(H_PROGRESS_TEXT, L"");
+
+            if (error_message) {
+                MessageBoxW(hwnd, error_message, L"Error", MB_OK | MB_ICONERROR);
+                free(error_message);
+            }
+
+            SELECTED_INDEX = -1;
+
+            return 0;
         }
 
         case WM_COMMAND: {
@@ -2380,7 +2856,21 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM lparam) {
             return 0;
         }
 
+        case WM_CLOSE: {
+            if (io_state_is_busy()) {
+                io_state_request_cancel();
+
+                if (IO_STATE.thread_handle) {
+                    WaitForSingleObject(IO_STATE.thread_handle, 2000);
+                }
+            }
+
+            DestroyWindow(hwnd);
+            break;
+        }
+
         case WM_DESTROY: {
+            io_state_cleanup();
             PostQuitMessage(0);
             return 0;
         }
@@ -2432,7 +2922,7 @@ int WINAPI WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_cmd
     const HWND hwnd = CreateWindowEx(0,
                                      _WINDOW_CLASS,
                                      _WINDOW_TITLE,
-                                     WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+                                     WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN,
                                      win_x,
                                      win_y,
                                      _WINDOW_W,
