@@ -59,9 +59,9 @@
 #include <pathcch.h>   // For long path support and newer file API (Windows 8+)
 #include <strsafe.h>   // Window API safer string handling
 
-//====================================================================//
-//                          -- LOGGING --                             //
-//====================================================================//
+//===================================================================//
+//                          -- LOGGING --                            //
+//===================================================================//
 #pragma region logging
 
 typedef enum {
@@ -75,9 +75,85 @@ typedef enum {
 static BOOL ATTACHED_TO_CONSOLE = FALSE;
 static FILE* LOG_FILE           = NULL;
 
-void log_msg(log_level level, const char* fmt, ...);
-void log_init(const char* filename);
-void log_close(void);
+void log_msg(log_level level, const char* fmt, ...) {
+    if (!LOG_FILE)
+        return;
+
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+
+    const char* level_str;
+    switch (level) {
+        case LOG_INFO:
+            level_str = "INFO";
+            break;
+        case LOG_WARN:
+            level_str = "WARN";
+            break;
+        case LOG_ERROR:
+            level_str = "ERROR";
+            break;
+        case LOG_FATAL:
+            level_str = "FATAL";
+            break;
+        case LOG_DEBUG:
+        default:
+            level_str = "DEBUG";
+            break;
+    }
+
+    va_list args;
+    va_start(args, fmt);
+    char body[1024] = {0};
+    vsnprintf(body, 1024, fmt, args);
+    va_end(args);
+
+    char msg[2048] = {0};
+    snprintf(msg,
+             2048,
+             "[%04d-%02d-%02d %02d:%02d:%02d.%03d] [%s] %s\n",
+             st.wYear,
+             st.wMonth,
+             st.wDay,
+             st.wHour,
+             st.wMinute,
+             st.wSecond,
+             st.wMilliseconds,
+             level_str,
+             body);
+
+    fprintf(LOG_FILE, "%s", msg);
+    fflush(LOG_FILE);
+
+    if (level == LOG_FATAL) {
+        char msgbox_msg[2048] = {0};
+        snprintf(msgbox_msg, 2048, "A fatal error has occured and K8-LRT must shutdown:\n\n%s", body);
+        MessageBoxA(NULL, msgbox_msg, "Fatal Error", MB_OK | MB_ICONERROR);
+    }
+
+#ifndef NDEBUG
+    if (ATTACHED_TO_CONSOLE) {
+        printf("%s", msg);
+    }
+#endif
+}
+
+void log_init(const char* filename) {
+    const errno_t result = fopen_s(&LOG_FILE, filename, "a+");  // append (+ read) mode
+    if (result == 0) {
+        log_msg(LOG_INFO, "--- K8-LRT Started ---");
+    } else {
+        MessageBox(NULL, "Failed to initialize logger.", "Fatal", MB_OK | MB_ICONERROR);
+        exit(1);
+    }
+}
+
+void log_close(void) {
+    if (LOG_FILE) {
+        log_msg(LOG_INFO, "--- K8-LRT Stopped ---");
+        fclose(LOG_FILE);
+    }
+}
 
 #define _INFO(fmt, ...) log_msg(LOG_INFO, fmt, ##__VA_ARGS__)
 #define _WARN(fmt, ...) log_msg(LOG_WARN, fmt, ##__VA_ARGS__)
@@ -90,9 +166,9 @@ void log_close(void);
 #define _LOG(fmt, ...) log_msg(LOG_DEBUG, fmt, ##__VA_ARGS__)
 
 #pragma endregion
-//====================================================================//
-//                           -- MEMORY --                             //
-//====================================================================//
+//===================================================================//
+//                           -- MEMORY --                            //
+//===================================================================//
 #pragma region memory
 
 #define INITIAL_STRPOOL_CAPACITY 16
@@ -300,95 +376,9 @@ void strpool_reset(void) {
 }
 
 #pragma endregion
-//====================================================================//
-//                          -- LOGGING --                             //
-//====================================================================//
-#pragma region logging
-
-void log_msg(log_level level, const char* fmt, ...) {
-    if (!LOG_FILE)
-        return;
-
-    SYSTEMTIME st;
-    GetLocalTime(&st);
-
-    const char* level_str;
-    switch (level) {
-        case LOG_INFO:
-            level_str = "INFO";
-            break;
-        case LOG_WARN:
-            level_str = "WARN";
-            break;
-        case LOG_ERROR:
-            level_str = "ERROR";
-            break;
-        case LOG_FATAL:
-            level_str = "FATAL";
-            break;
-        case LOG_DEBUG:
-        default:
-            level_str = "DEBUG";
-            break;
-    }
-
-    va_list args;
-    va_start(args, fmt);
-    char body[1024] = {0};
-    vsnprintf(body, 1024, fmt, args);
-    va_end(args);
-
-    char msg[2048] = {0};
-    snprintf(msg,
-             2048,
-             "[%04d-%02d-%02d %02d:%02d:%02d.%03d] [%s] %s\n",
-             st.wYear,
-             st.wMonth,
-             st.wDay,
-             st.wHour,
-             st.wMinute,
-             st.wSecond,
-             st.wMilliseconds,
-             level_str,
-             body);
-
-    fprintf(LOG_FILE, "%s", msg);
-    fflush(LOG_FILE);
-
-    if (level == LOG_FATAL) {
-        char msgbox_msg[2048] = {0};
-        snprintf(msgbox_msg, 2048, "A fatal error has occured and K8-LRT must shutdown:\n\n%s", body);
-        MessageBoxA(NULL, msgbox_msg, "Fatal Error", MB_OK | MB_ICONERROR);
-    }
-
-#ifndef NDEBUG
-    if (ATTACHED_TO_CONSOLE) {
-        printf("%s", msg);
-    }
-#endif
-}
-
-void log_init(const char* filename) {
-    const errno_t result = fopen_s(&LOG_FILE, filename, "a+");  // append (+ read) mode
-    if (result == 0) {
-        log_msg(LOG_INFO, "--- K8-LRT Started ---");
-    } else {
-        MessageBox(NULL, "Failed to initialize logger.", "Fatal", MB_OK | MB_ICONERROR);
-        exit(1);
-    }
-}
-
-void log_close(void) {
-    if (LOG_FILE) {
-        log_msg(LOG_INFO, "--- K8-LRT Stopped ---");
-        fclose(LOG_FILE);
-    }
-}
-
-#pragma endregion
-//====================================================================//
-//                   -- UI ELEMENT DEFINITIONS --                     //
-//====================================================================//
+//===================================================================//
+//                   -- UI ELEMENT DEFINITIONS --                    //
+//===================================================================//
 #pragma region ui element definitions
 
 #include "resource.h"
@@ -405,9 +395,9 @@ static HWND H_RELOCATE_BUTTON            = NULL;
 static HFONT UI_FONT = NULL;
 
 #pragma endregion
-//====================================================================//
-//                          -- GLOBALS --                             //
-//====================================================================//
+//===================================================================//
+//                          -- GLOBALS --                            //
+//===================================================================//
 #pragma region globals
 
 #define _WINDOW_W 300
@@ -524,9 +514,9 @@ static char* KEY_EXCLUSION_PATTERNS[KEY_EXCLUSION_PATTERNS_SIZE] = {
 };
 
 #pragma endregion
-//====================================================================//
-//                      -- HELPER FUNCTIONS --                        //
-//====================================================================//
+//===================================================================//
+//                      -- HELPER FUNCTIONS --                       //
+//===================================================================//
 #pragma region helper functions
 
 #ifndef NDEBUG
@@ -1417,9 +1407,9 @@ BOOL open_folder_dialog(HWND owner, char* dst, int len) {
 }
 
 #pragma endregion
-//====================================================================//
-//                     -- UI HELPER FUNCTIONS --                      //
-//====================================================================//
+//===================================================================//
+//                     -- UI HELPER FUNCTIONS --                     //
+//===================================================================//
 #pragma region ui helper functions
 
 void create_button(HWND* button, const char* label, int x, int y, int w, int h, HWND hwnd, int menu, BOOL disabled) {
@@ -1520,9 +1510,9 @@ void create_menu_bar(HWND hwnd) {
 }
 
 #pragma endregion
-//====================================================================//
-//                      -- DIALOG CALLBACKS --                        //
-//====================================================================//
+//===================================================================//
+//                      -- DIALOG CALLBACKS --                       //
+//===================================================================//
 #pragma region dialog callbacks
 
 LRESULT CALLBACK log_viewer_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM lparam) {
@@ -1972,9 +1962,9 @@ INT_PTR CALLBACK relocate_dialog_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARA
 }
 
 #pragma endregion
-//====================================================================//
-//                     -- WNDPROC CALLBACKS --                        //
-//====================================================================//
+//===================================================================//
+//                     -- WNDPROC CALLBACKS --                       //
+//===================================================================//
 #pragma region wndproc callbacks
 
 LRESULT on_create(HWND hwnd) {
@@ -2303,9 +2293,9 @@ void on_about(HWND hwnd) {
 }
 
 #pragma endregion
-//====================================================================//
-//                      -- WINDOW CALLBACK --                         //
-//====================================================================//
+//===================================================================//
+//                      -- WINDOW CALLBACK --                        //
+//===================================================================//
 #pragma region window callbacks
 
 LRESULT CALLBACK wnd_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM lparam) {
@@ -2401,9 +2391,9 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM lparam) {
 
 #pragma endregion
 
-//====================================================================//
-//                         -- ENTRYPOINT --                           //
-//====================================================================//
+//===================================================================//
+//                         -- ENTRYPOINT --                          //
+//===================================================================//
 
 int WINAPI WinMain(HINSTANCE h_instance, HINSTANCE h_prev_instance, LPSTR lp_cmd_line, int n_cmd_show) {
 #ifndef NDEBUG
