@@ -29,6 +29,11 @@ add_executable(K8-LRT WIN32
         ${SRC_DIR}/main.c
 )
 
+target_include_directories(K8-LRT PRIVATE
+        ${SRC_DIR}
+        ${CMAKE_SOURCE_DIR}/vendor
+)
+
 target_link_options(K8-LRT PRIVATE "/MANIFEST:NO")
 
 target_compile_definitions(K8-LRT PRIVATE
@@ -40,6 +45,15 @@ set_target_properties(K8-LRT PROPERTIES
         MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
 )
 
+include(FetchContent)
+FetchContent_Declare(
+        expat
+        GIT_REPOSITORY https://github.com/libexpat/libexpat/
+        GIT_TAG R_2_7_4
+        SOURCE_SUBDIR expat/
+)
+FetchContent_MakeAvailable(expat)
+
 target_link_libraries(K8-LRT PRIVATE
         user32
         gdi32
@@ -49,4 +63,5 @@ target_link_libraries(K8-LRT PRIVATE
         shlwapi
         comctl32
         winhttp
+        expat
 )

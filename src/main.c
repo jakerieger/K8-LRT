@@ -2062,7 +2062,7 @@ static UINT __stdcall delete_library_thread_proc(void* param) {
     if (!params)
         return 1;
 
-    HRESULT hr = E_FAIL;
+    HRESULT hr = S_OK;
 
     // Find XML file
     char xml_file[MAX_PATH];
@@ -2074,6 +2074,7 @@ static UINT __stdcall delete_library_thread_proc(void* param) {
     const char* SNPID = find_snpid(xml_file, params->library_name);
 
     // Delete cache file
+    const wchar_t* file_to_delete = NULL;
     if (SNPID != NULL) {
         // Iterate over files in cache directory
         int count;
@@ -2092,25 +2093,53 @@ static UINT __stdcall delete_library_thread_proc(void* param) {
                         snpid[length] = L'\0';
                     }
                     if (_STREQ(SNPID, wide_to_narrow(snpid))) {
-                        // Mark file for deletion
+                        file_to_delete = file;
+                        break;
                     }
                 }
             }
         }
+        free(files);
+    }
+
+    if (file_to_delete) {
+        // Delete cache file
+        if (!DeleteFileW(file_to_delete)) {
+            // error deleting file
+            hr = E_FAIL;
+            goto end_op;
+        }
     }
 
     // Delete db3 file and create backup
+    const char* db3_bak = join_str(_DB3_PATH, ".bak");
+    if (file_exists(_DB3_PATH)) {
+        if (CopyFileA(_DB3_PATH, db3_bak, FALSE)) {
+            if (!DeleteFileA(_DB3_PATH)) {
+                // Failed to delete DB3 file
+                hr = E_FAIL;
+                goto end_op;
+            }
+        }
+    }
 
+    // Check for JWT RAS3 auth file
+
+    // Update registry
+
+    // Delete actual content directory (if requested)
+
+end_op:
     io_state_end_operation();
 
     if (hr == E_ABORT) {
         wchar_t* msg = _wcsdup(L"Operation cancelled by user.");
         PostMessage(params->hwnd, WM_IO_COMPLETE, FALSE, (LPARAM)msg);
     } else if (SUCCEEDED(hr)) {
-        wchar_t* msg = _wcsdup(L"Files deleted successfully!");
+        wchar_t* msg = _wcsdup(L"Library deleted successfully!");
         PostMessage(params->hwnd, WM_IO_COMPLETE, TRUE, (LPARAM)msg);
     } else {
-        wchar_t* error = _wcsdup(L"Failed to delete files.");
+        wchar_t* error = _wcsdup(L"Failed to delete library.");
         PostMessage(params->hwnd, WM_IO_ERROR, 0, (LPARAM)error);
     }
 
