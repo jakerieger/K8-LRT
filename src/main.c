@@ -98,6 +98,7 @@
 #include <shobjidl.h>  // For IFileOperation
 #include <strsafe.h>   // Window API safer string handling
 #include <process.h>   // Threading
+#include <expat.h>     // For XML parsing
 
 //===================================================================//
 //                    -- IFILEOPERATION WRAPPER --                   //
@@ -629,9 +630,14 @@ static HFONT UI_FONT = NULL;
 #define _MAX_KEY_LENGTH 255
 #define _MAX_PATH_NFTS 32768
 
+// Path roots
+#define _PRIMARY_REG_ROOT "SOFTWARE\\Native Instruments\0"
+#define _SECONDARY_REG_ROOT "SOFTWARE\\WOW6432Node\\Native Instruments\0"
+#define _SERVICE_CENTER_ROOT "C:\\Program Files\\Common Files\\Native Instruments\\Service Center\0"
+#define _NATIVE_ACCESS_XML "C:\\Program Files\\Common Files\\Native Instruments\\Service Center\\NativeAccess.xml\0"
 #define _LIB_CACHE_ROOT "Native Instruments\\Kontakt 8\\LibrariesCache\0"
-#define _DB3_ROOT "Native Instruments\\Kontakt 8\\komplete.db3\0"
 #define _RAS3_ROOT "C:\\Users\\Public\\Documents\\Native Instruments\\Native Access\\ras3\0"
+#define _DB3_PATH "Native Instruments\\Kontakt 8\\komplete.db3\0"
 
 typedef struct library_entry library_entry;
 
@@ -1298,6 +1304,18 @@ static HRESULT copy_path_ifileop(HWND hwnd, const wchar_t* src_path, const wchar
     #define _NOT_IMPLEMENTED()
 #endif
 
+char* wide_to_narrow(const wchar_t* wide_str) {
+    if (wide_str == NULL)
+        return NULL;
+    const int size_needed = WideCharToMultiByte(CP_UTF8, 0, wide_str, -1, NULL, 0, NULL, NULL);
+    char* narrow_str      = (char*)malloc(size_needed);
+    if (narrow_str) {
+        WideCharToMultiByte(CP_UTF8, 0, wide_str, -1, narrow_str, size_needed, NULL, NULL);
+    }
+
+    return narrow_str;
+}
+
 wchar_t* make_long_path(const char* path) {
     if (!path)
         return NULL;
@@ -1503,7 +1521,7 @@ BOOL delete_registry_key(HKEY base_key, const char* key) {
     return TRUE;
 }
 
-int enumerate_registry_keys(HKEY key, char* keys[]) {
+int enumerate_registry_keys(HKEY key, const char* base, char* keys[]) {
     char current_key[_MAX_KEY_LENGTH];
     DWORD buffer_size = sizeof(current_key);
     FILETIME ft_last;
@@ -1512,7 +1530,7 @@ int enumerate_registry_keys(HKEY key, char* keys[]) {
     while (RegEnumKeyExA(key, index, current_key, &buffer_size, NULL, NULL, NULL, &ft_last) == ERROR_SUCCESS) {
         _INFO("Found registry entry: '%s'", current_key);
         buffer_size   = sizeof(current_key);
-        keys[index++] = strpool_strdup(current_key);
+        keys[index++] = strpool_sprintf("%s\\%s", base, current_key);
     }
 
     return index;
@@ -1540,43 +1558,61 @@ BOOL set_registry_value_str(HKEY key, const char* value_name, const char* new_va
 BOOL query_libraries(HWND hwnd) {
     clear_libraries();
 
-    HKEY base_key;
-    LPCSTR base_path = "SOFTWARE\\Native Instruments";
-    BOOL open_result = open_registry_key(&base_key, HKEY_LOCAL_MACHINE, base_path, KEY_READ);
-    if (!open_result)
-        return FALSE;
+    char* keys_primary[_MAX_LIB_COUNT]   = {0};
+    char* keys_secondary[_MAX_LIB_COUNT] = {0};
+    int key_count_primary                = 0;
+    int keys_count_secondary             = 0;
+    HKEY key_primary;
+    HKEY key_secondary;
 
-    char* keys[_MAX_LIB_COUNT] = {0};
-    const int key_count        = enumerate_registry_keys(base_key, keys);
+    BOOL open_result = open_registry_key(&key_primary, HKEY_LOCAL_MACHINE, _PRIMARY_REG_ROOT, KEY_READ);
+    if (open_result) {
+        key_count_primary = enumerate_registry_keys(key_primary, _PRIMARY_REG_ROOT, keys_primary);
+        close_registry_key(&key_primary);
+    }
 
-    close_registry_key(&base_key);
+    open_result = open_registry_key(&key_secondary, HKEY_LOCAL_MACHINE, _SECONDARY_REG_ROOT, KEY_READ);
+    if (open_result) {
+        keys_count_secondary = enumerate_registry_keys(key_secondary, _SECONDARY_REG_ROOT, keys_secondary);
+        close_registry_key(&key_secondary);
+    }
 
-    for (int i = 0; i < key_count; i++) {
+    // Join key arrays
+    const size_t total = key_count_primary + keys_count_secondary;
+    char** keys        = malloc(sizeof(char*) * total);
+    memcpy(keys, keys_primary, sizeof(char*) * key_count_primary);
+    memcpy(keys + key_count_primary, keys_secondary, sizeof(char*) * keys_count_secondary);
+
+    for (int i = 0; i < total; i++) {
         if (i >= _MAX_LIB_COUNT)
             break;
 
-        const char* key_str = keys[i];
+        const char* path       = keys[i];
+        const char* last_slash = strrchr(path, '\\');
+        if (last_slash == NULL) {
+            _ERROR("Invalid registry path");
+            break;
+        }
+        const char* name = last_slash + 1;
 
-        const BOOL in_exclusion_list = list_contains(KEY_EXCLUSION_LIST, KEY_EXCLUSION_LIST_SIZE, key_str);
+        const BOOL in_exclusion_list = list_contains(KEY_EXCLUSION_LIST, KEY_EXCLUSION_LIST_SIZE, name);
         const BOOL matches_exclusion_pattern =
-          matches_pattern_in_list(KEY_EXCLUSION_PATTERNS, KEY_EXCLUSION_PATTERNS_SIZE, key_str);
+          matches_pattern_in_list(KEY_EXCLUSION_PATTERNS, KEY_EXCLUSION_PATTERNS_SIZE, name);
         if (in_exclusion_list || matches_exclusion_pattern)
             continue;
 
         HKEY key;
-        open_result = open_registry_key(&key, HKEY_LOCAL_MACHINE, join_paths(base_path, key_str), KEY_READ);
+        open_result = open_registry_key(&key, HKEY_LOCAL_MACHINE, path, KEY_READ);
         if (!open_result)
             continue;
 
-        library_entry entry     = {.name = key_str, NULL};
+        library_entry entry     = {.name = name, NULL};
         const char* content_dir = get_registry_value_str(key, "ContentDir");
 
         if (content_dir != NULL) {
             entry.content_dir = content_dir;
         } else {
-            _WARN("Failed to retrieve ContentDir value for registry key: 'HKEY_LOCAL_MACHINE\\%s\\%s'",
-                  base_path,
-                  key_str);
+            _WARN("Failed to retrieve ContentDir value for registry key: 'HKEY_LOCAL_MACHINE\\%s'", path);
         }
 
         memcpy(&LIBRARIES[LIB_COUNT], &entry, sizeof(entry));
@@ -1587,6 +1623,8 @@ BOOL query_libraries(HWND hwnd) {
         LIB_COUNT++;
         close_registry_key(&key);
     }
+
+    free(keys);
 
     _INFO("Finished querying registry entries (found %d library entries)", LIB_COUNT);
 
@@ -1883,6 +1921,119 @@ BOOL open_folder_dialog(HWND owner, char* dst, int len) {
     return success;
 }
 
+typedef struct {
+    const char* target_name;  // Library name to search for
+    char found_snpid[64];     // Buffer for result
+    int inside_product;       // Currently inside <Product>
+    int inside_name;          // Currently inside <Name>
+    int inside_snpid;         // Currently inside <SNPID>
+    int current_entry_match;  // Does the <Name> match?
+} parser_state;
+
+void xml_start_element(void* user_data, const char* name, const char** attrs) {
+    parser_state* state = (parser_state*)user_data;
+
+    if (_STREQ(name, "Product")) {
+        state->inside_product      = 1;
+        state->current_entry_match = 0;
+    } else if (state->inside_product) {
+        if (_STREQ(name, "Name")) {
+            state->inside_name = 1;
+        } else if (_STREQ(name, "SNPID")) {
+            state->inside_snpid = 1;
+        }
+    }
+}
+
+void xml_char_data(void* user_data, const char* s, int len) {
+    parser_state* state = (parser_state*)user_data;
+
+    if (state->inside_name) {
+        if (state->target_name && strncmp(state->target_name, s, len) == 0) {
+            state->current_entry_match = 1;
+        }
+    } else if (state->inside_snpid) {
+        if (state->target_name == NULL || state->current_entry_match) {
+            if (len < 63) {
+                strncpy(state->found_snpid, s, len);
+                state->found_snpid[len] = '\0';
+            }
+        }
+    }
+}
+
+void xml_end_element(void* user_data, const char* name) {
+    parser_state* state = (parser_state*)user_data;
+
+    if (_STREQ(name, "Product"))
+        state->inside_product = 0;
+    else if (_STREQ(name, "Name"))
+        state->inside_name = 0;
+    else if (_STREQ(name, "SNPID"))
+        state->inside_snpid = 0;
+}
+
+char* find_snpid(const char* xml_file, const char* library_name) {
+    FILE* fp = fopen(xml_file, "r");
+    if (!fp)
+        return NULL;
+
+    const XML_Parser parser = XML_ParserCreate(NULL);
+    parser_state state      = {0};
+    state.target_name       = library_name;
+
+    XML_SetUserData(parser, &state);
+    XML_SetElementHandler(parser, xml_start_element, xml_end_element);
+    XML_SetCharacterDataHandler(parser, xml_char_data);
+
+    char buffer[1024 * 8];
+    int done;
+    do {
+        const size_t len = fread(buffer, 1, sizeof(buffer), fp);
+        done             = (len < sizeof(buffer));
+        if (XML_Parse(parser, buffer, (int)len, done) == XML_STATUS_ERROR) {
+            _ERROR("XML Error: %s\n", XML_ErrorString(XML_GetErrorCode(parser)));
+            break;
+        }
+        if (state.found_snpid[0] != '\0' && library_name != NULL)
+            break;
+    } while (!done);
+
+    XML_ParserFree(parser);
+    fclose(fp);
+
+    return state.found_snpid[0] != '\0' ? _strdup(state.found_snpid) : NULL;
+}
+
+wchar_t** enumerate_directory_files(const char* directory, int* count) {
+    wchar_t search_path[MAX_PATH];
+    swprintf(search_path, MAX_PATH, L"%hs\\*.cache", directory);
+
+    WIN32_FIND_DATAW find_data;
+    const HANDLE h_find = FindFirstFileW(search_path, &find_data);
+
+    if (h_find == INVALID_HANDLE_VALUE)
+        return NULL;
+
+    wchar_t** files = NULL;
+    *count          = 0;
+    do {
+        if (!(find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            wchar_t** new_files = (wchar_t**)realloc(files, sizeof(wchar_t*) * (*count + 1));
+            if (!new_files)
+                return NULL;
+            wchar_t filepath[MAX_PATH] = {L'\0'};
+            swprintf(filepath, MAX_PATH, L"%hs\\%ls", directory, find_data.cFileName);
+            new_files[(*count)++] = _wcsdup(filepath);
+            files                 = new_files;
+        }
+    } while (FindNextFileW(h_find, &find_data) != 0);
+
+    FindClose(h_find);
+
+    return files;
+}
+
 #pragma endregion
 
 //===================================================================//
@@ -1895,6 +2046,8 @@ typedef struct {
     HWND hwnd;
     const char* library_name;
     const wchar_t* content_dir;
+    BOOL backup;
+    BOOL remove_content;
 } delete_library_thread_params;
 
 typedef struct {
@@ -1909,8 +2062,44 @@ static UINT __stdcall delete_library_thread_proc(void* param) {
     if (!params)
         return 1;
 
-    // Dispatch threaded file operations
-    HRESULT hr = delete_path_ifileop(params->hwnd, params->content_dir, TRUE);
+    HRESULT hr = E_FAIL;
+
+    // Find XML file
+    char xml_file[MAX_PATH];
+    snprintf(xml_file, sizeof(xml_file), "%s\\%s.xml", _SERVICE_CENTER_ROOT, params->library_name);
+    if (!file_exists(xml_file)) {
+        memset(xml_file, 0, sizeof(xml_file));
+        strcpy_s(xml_file, sizeof(xml_file), _NATIVE_ACCESS_XML);
+    }
+    const char* SNPID = find_snpid(xml_file, params->library_name);
+
+    // Delete cache file
+    if (SNPID != NULL) {
+        // Iterate over files in cache directory
+        int count;
+        wchar_t** files = enumerate_directory_files(join_paths(get_local_appdata_path(), _LIB_CACHE_ROOT), &count);
+        if (count > 0) {
+            for (int i = 0; i < count; i++) {
+                const wchar_t* file       = files[i];
+                const wchar_t* last_slash = wcsrchr(file, '\\');
+                if (last_slash) {
+                    const wchar_t* filename = last_slash + 1;
+                    const int start_index   = 1;
+                    const int length        = 3;
+                    wchar_t* snpid          = (wchar_t*)malloc((length + 1) * sizeof(wchar_t));
+                    if (snpid) {
+                        wcsncpy(snpid, filename + start_index, length);
+                        snpid[length] = L'\0';
+                    }
+                    if (_STREQ(SNPID, wide_to_narrow(snpid))) {
+                        // Mark file for deletion
+                    }
+                }
+            }
+        }
+    }
+
+    // Delete db3 file and create backup
 
     io_state_end_operation();
 
@@ -1960,11 +2149,13 @@ void start_delete_library_operation(
     if (!params)
         return;
 
-    params->hwnd         = hwnd;
-    params->library_name = library_name;
-    params->content_dir  = content_dir;
+    params->hwnd           = hwnd;
+    params->library_name   = library_name;
+    params->content_dir    = content_dir;
+    params->backup         = backup;
+    params->remove_content = remove_content;
 
-    const UINT_PTR thread_handle = _beginthreadex(NULL, 0, delete_library_thread_proc, (void*)params, 0, NULL);
+    const UINT_PTR thread_handle = _beginthreadex(NULL, 0, delete_library_thread_proc, params, 0, NULL);
     if (thread_handle) {
         const HANDLE handle = (HANDLE)thread_handle;
         if (!io_state_try_start_operation(handle)) {
@@ -1992,7 +2183,7 @@ void start_relocate_library_operation(HWND hwnd,
     params->content_dir     = content_dir;
     params->new_content_dir = new_content_dir;
 
-    const UINT_PTR thread_handle = _beginthreadex(NULL, 0, relocate_library_thread_proc, (void*)params, 0, NULL);
+    const UINT_PTR thread_handle = _beginthreadex(NULL, 0, relocate_library_thread_proc, params, 0, NULL);
     if (thread_handle) {
         const HANDLE handle = (HANDLE)thread_handle;
         if (!io_state_try_start_operation(handle)) {
