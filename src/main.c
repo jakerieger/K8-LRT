@@ -1,5 +1,6 @@
+// clang-format off
 /*
-    K8-LRT - v2.1.0 - Library removal tool for Bobdule's Kontakt 8
+    K8-LRT - v3.0.0 - Library removal tool for Bobdule's Kontakt 8
 
     LICENSE
 
@@ -30,9 +31,39 @@
 
         For more information, please refer to <https://unlicense.org/>
 
+    REMOVAL PROCESS
+
+        This process of steps is executed by the program to remove libraries. In theory, you could do all
+        of this manually. K8-LRT just makes it a lot easier.
+
+        - Locate library entries in the registry. These are located under two locations:
+            - HKEY_LOCAL_MACHINE\SOFTWARE\Native Instruments              (Primary)
+            - HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Native Instruments  (Secondary, rare)
+        - Library entries have a `ContentDir` value that stores the location of the actual library on
+          disk. We store this and the library name retrieved from the registry key to a list.
+        - When a library is selected for removal, we take the following actions:
+            1.  Find the corresponding <LibraryName>.xml file located in:
+                  C:\Program Files\Common Files\Native Instruments\Service Center
+            2.  If it doesn't exist, check the `NativeAccess.xml` file in the same path for an entry.
+            3.  Save the `SNPID` value from the XML file and delete it (DO NOT REMOVE NativeAccess.xml)
+            4.  Find the corresponding .cache file located in:
+                  ~\AppData\Local\Native Instruments\Kontakt 8\LibrariesCache
+                The filename has the format "K{SNPID}...".cache
+            5.  Delete the .cache file.
+            6.  Delete and create a backup of ~\AppData\Local\Native Instruments\Kontakt 8\komplete.db3.
+                Kontakt will rebuild this next time it's launched.
+            7.  Look for the associated `.jwt` file located in:
+                  C:\Users\Public\Documents\Native Instruments\Native Access\ras3
+            8.  Delete the .jwt file.
+            9.  Delete the library content directory (if the user selected to do so).
+            10. Delete the registry key (and create a backup if requested).
+        - Relocating a library simply involves moving the content directory to the new location
+          and updating the `ContentDir` registry value
+
     REVISION HISTORY
 
-        2.1.0  (2026-02-01)  multi-threading, progress indicator
+        3.0.0  (2026-02-01)  multi-threading, progress indicator, unified file api via IFileOperation,
+                             refactored file operations
         2.0.0  (2026-01-31)  bug fixes for registry querying, relocating libraries,
                              removed support for Windows 7, string pool
                              memory management, wide path support
@@ -43,10 +74,15 @@
         0.2.0  (2026-01-23)  tons of bug fixes and code improvements
         0.1.0  (2026-01-22)  initial release of K8-LRT
 */
+// clang-format on
 
 #include "version.h"
 
+#pragma warning(disable : 4312)
+
 #define _CRT_SECURE_NO_WARNINGS 1
+#define NTDDI_VERSION NTDDI_VISTA
+#define _WIN32_WINNT 0x0600
 
 #include <stdio.h>
 #include <stdarg.h>
@@ -59,9 +95,75 @@
 #include <winuser.h>   // Dialogs and display
 #include <commctrl.h>  // For modern Windows styling (Common Controls)
 #include <winhttp.h>   // For checking for updates
-#include <pathcch.h>   // For long path support and newer file API (Windows 8+)
+#include <shobjidl.h>  // For IFileOperation
 #include <strsafe.h>   // Window API safer string handling
 #include <process.h>   // Threading
+
+//===================================================================//
+//                    -- IFILEOPERATION WRAPPER --                   //
+//===================================================================//
+
+#pragma region ifileoperation wrapper
+
+typedef struct {
+    IFileOperationProgressSink sink;
+    LONG ref_count;
+    HWND main_window;
+    UINT64 total_size;
+    UINT64 completed_size;
+    UINT64 current_item_size;
+    DWORD item_count;
+    DWORD completed_items;
+    CRITICAL_SECTION cs;
+    wchar_t operation_name[256];
+    BOOL* cancel_flag;
+} file_op_progress_sink;
+
+// Forward declarations
+// clang-format off
+static HRESULT STDMETHODCALLTYPE FileOpProgressSink_QueryInterface(IFileOperationProgressSink* This, REFIID riid, void** ppv);
+static ULONG STDMETHODCALLTYPE FileOpProgressSink_AddRef(IFileOperationProgressSink* This);
+static ULONG STDMETHODCALLTYPE FileOpProgressSink_Release(IFileOperationProgressSink* This);
+static HRESULT STDMETHODCALLTYPE FileOpProgressSink_StartOperations(IFileOperationProgressSink* This);
+static HRESULT STDMETHODCALLTYPE FileOpProgressSink_FinishOperations(IFileOperationProgressSink* This, HRESULT hrResult);
+static HRESULT STDMETHODCALLTYPE FileOpProgressSink_PreRenameItem(IFileOperationProgressSink* This, DWORD dwFlags, IShellItem* psiItem, LPCWSTR pszNewName);
+static HRESULT STDMETHODCALLTYPE FileOpProgressSink_PostRenameItem(IFileOperationProgressSink* This, DWORD dwFlags, IShellItem* psiItem, LPCWSTR pszNewName, HRESULT hrRename, IShellItem* psiNewlyCreated);
+static HRESULT STDMETHODCALLTYPE FileOpProgressSink_PreMoveItem(IFileOperationProgressSink* This, DWORD dwFlags, IShellItem* psiItem, IShellItem* psiDestinationFolder, LPCWSTR pszNewName);
+static HRESULT STDMETHODCALLTYPE FileOpProgressSink_PostMoveItem(IFileOperationProgressSink* This, DWORD dwFlags, IShellItem* psiItem, IShellItem* psiDestinationFolder, LPCWSTR pszNewName, HRESULT hrMove, IShellItem* psiNewlyCreated);
+static HRESULT STDMETHODCALLTYPE FileOpProgressSink_PreCopyItem(IFileOperationProgressSink* This, DWORD dwFlags, IShellItem* psiItem, IShellItem* psiDestinationFolder, LPCWSTR pszNewName);
+static HRESULT STDMETHODCALLTYPE FileOpProgressSink_PostCopyItem(IFileOperationProgressSink* This, DWORD dwFlags, IShellItem* psiItem, IShellItem* psiDestinationFolder, LPCWSTR pszNewName, HRESULT hrCopy, IShellItem* psiNewlyCreated);
+static HRESULT STDMETHODCALLTYPE FileOpProgressSink_PreDeleteItem(IFileOperationProgressSink* This, DWORD dwFlags, IShellItem* psiItem);
+static HRESULT STDMETHODCALLTYPE FileOpProgressSink_PostDeleteItem(IFileOperationProgressSink* This, DWORD dwFlags, IShellItem* psiItem, HRESULT hrDelete, IShellItem* psiNewlyCreated);
+static HRESULT STDMETHODCALLTYPE FileOpProgressSink_PreNewItem(IFileOperationProgressSink* This, DWORD dwFlags, IShellItem* psiDestinationFolder, LPCWSTR pszNewName);
+static HRESULT STDMETHODCALLTYPE FileOpProgressSink_PostNewItem(IFileOperationProgressSink* This, DWORD dwFlags, IShellItem* psiDestinationFolder, LPCWSTR pszNewName, LPCWSTR pszTemplateName, DWORD dwFileAttributes, HRESULT hrNew, IShellItem* psiNewItem);
+static HRESULT STDMETHODCALLTYPE FileOpProgressSink_UpdateProgress(IFileOperationProgressSink* This, UINT iWorkTotal, UINT iWorkSoFar);
+static HRESULT STDMETHODCALLTYPE FileOpProgressSink_ResetTimer(IFileOperationProgressSink* This);
+static HRESULT STDMETHODCALLTYPE FileOpProgressSink_PauseTimer(IFileOperationProgressSink* This);
+static HRESULT STDMETHODCALLTYPE FileOpProgressSink_ResumeTimer(IFileOperationProgressSink* This);
+// clang-format on
+
+// VTable for the progress sink
+static IFileOperationProgressSinkVtbl file_op_progress_sink_vtable = {FileOpProgressSink_QueryInterface,
+                                                                      FileOpProgressSink_AddRef,
+                                                                      FileOpProgressSink_Release,
+                                                                      FileOpProgressSink_StartOperations,
+                                                                      FileOpProgressSink_FinishOperations,
+                                                                      FileOpProgressSink_PreRenameItem,
+                                                                      FileOpProgressSink_PostRenameItem,
+                                                                      FileOpProgressSink_PreMoveItem,
+                                                                      FileOpProgressSink_PostMoveItem,
+                                                                      FileOpProgressSink_PreCopyItem,
+                                                                      FileOpProgressSink_PostCopyItem,
+                                                                      FileOpProgressSink_PreDeleteItem,
+                                                                      FileOpProgressSink_PostDeleteItem,
+                                                                      FileOpProgressSink_PreNewItem,
+                                                                      FileOpProgressSink_PostNewItem,
+                                                                      FileOpProgressSink_UpdateProgress,
+                                                                      FileOpProgressSink_ResetTimer,
+                                                                      FileOpProgressSink_PauseTimer,
+                                                                      FileOpProgressSink_ResumeTimer};
+
+#pragma endregion
 
 //===================================================================//
 //                          -- LOGGING --                            //
@@ -394,62 +496,68 @@ void strpool_reset(void) {
 #define WM_IO_COMPLETE (WM_USER + 101)
 #define WM_IO_ERROR (WM_USER + 102)
 
-typedef enum {
-    IO_STATE_IDLE = 0,
-    IO_STATE_REMOVING,
-    IO_STATE_COPYING,
-    IO_STATE_RELOCATING,
-} io_operation_state;
-
 typedef struct {
-    io_operation_state state;
-    CRITICAL_SECTION cs;
-    HWND main_window;
     HANDLE thread_handle;
+    volatile BOOL is_busy;
     volatile BOOL cancel_requested;
+    CRITICAL_SECTION cs;
 } io_state_manager;
 
 static io_state_manager IO_STATE = {0};
 
-void io_state_init(HWND hwnd) {
-    IO_STATE.state         = IO_STATE_IDLE;
-    IO_STATE.main_window   = hwnd;
-    IO_STATE.thread_handle = NULL;
+void io_state_init(void) {
     InitializeCriticalSection(&IO_STATE.cs);
+    IO_STATE.thread_handle    = NULL;
+    IO_STATE.is_busy          = FALSE;
+    IO_STATE.cancel_requested = FALSE;
 }
 
 void io_state_cleanup(void) {
-    DeleteCriticalSection(&IO_STATE.cs);
-}
-
-BOOL io_state_is_busy(void) {
-    // ReSharper disable once CppJoinDeclarationAndAssignment
-    BOOL busy;
     EnterCriticalSection(&IO_STATE.cs);
-    busy = (IO_STATE.state != IO_STATE_IDLE);
-    LeaveCriticalSection(&IO_STATE.cs);
-    return busy;
-}
 
-BOOL io_state_try_begin(io_operation_state new_state) {
-    BOOL success = FALSE;
-    EnterCriticalSection(&IO_STATE.cs);
-    if (IO_STATE.state == IO_STATE_IDLE) {
-        IO_STATE.state            = new_state;
-        IO_STATE.cancel_requested = FALSE;
-        success                   = TRUE;
-    }
-    LeaveCriticalSection(&IO_STATE.cs);
-    return success;
-}
-
-void io_state_end(void) {
-    EnterCriticalSection(&IO_STATE.cs);
-    IO_STATE.state = IO_STATE_IDLE;
     if (IO_STATE.thread_handle) {
         CloseHandle(IO_STATE.thread_handle);
         IO_STATE.thread_handle = NULL;
     }
+
+    LeaveCriticalSection(&IO_STATE.cs);
+    DeleteCriticalSection(&IO_STATE.cs);
+}
+
+BOOL io_state_is_busy(void) {
+    EnterCriticalSection(&IO_STATE.cs);
+    const BOOL busy = IO_STATE.is_busy;
+    LeaveCriticalSection(&IO_STATE.cs);
+    return busy;
+}
+
+BOOL io_state_try_start_operation(HANDLE thread_handle) {
+    EnterCriticalSection(&IO_STATE.cs);
+
+    if (IO_STATE.is_busy) {
+        LeaveCriticalSection(&IO_STATE.cs);
+        return FALSE;
+    }
+
+    IO_STATE.is_busy          = TRUE;
+    IO_STATE.cancel_requested = FALSE;
+    IO_STATE.thread_handle    = thread_handle;
+
+    LeaveCriticalSection(&IO_STATE.cs);
+    return TRUE;
+}
+
+void io_state_end_operation(void) {
+    EnterCriticalSection(&IO_STATE.cs);
+
+    if (IO_STATE.thread_handle) {
+        CloseHandle(IO_STATE.thread_handle);
+        IO_STATE.thread_handle = NULL;
+    }
+
+    IO_STATE.is_busy          = FALSE;
+    IO_STATE.cancel_requested = FALSE;
+
     LeaveCriticalSection(&IO_STATE.cs);
 }
 
@@ -459,18 +567,17 @@ void io_state_set_thread(HANDLE thread) {
     LeaveCriticalSection(&IO_STATE.cs);
 }
 
-BOOL io_state_should_cancel(void) {
-    BOOL cancel;
-    EnterCriticalSection(&IO_STATE.cs);
-    cancel = IO_STATE.cancel_requested;
-    LeaveCriticalSection(&IO_STATE.cs);
-    return cancel;
-}
-
 void io_state_request_cancel(void) {
     EnterCriticalSection(&IO_STATE.cs);
     IO_STATE.cancel_requested = TRUE;
     LeaveCriticalSection(&IO_STATE.cs);
+}
+
+BOOL io_state_is_cancelled(void) {
+    EnterCriticalSection(&IO_STATE.cs);
+    const BOOL cancelled = IO_STATE.cancel_requested;
+    LeaveCriticalSection(&IO_STATE.cs);
+    return cancelled;
 }
 
 #pragma endregion
@@ -628,46 +735,18 @@ static char* KEY_EXCLUSION_PATTERNS[KEY_EXCLUSION_PATTERNS_SIZE] = {
 #pragma region progress reporting
 
 typedef struct {
-    DWORD last_update_time;
-    int last_update_percent;
-} progress_throttle_state;
-
-void throttle_init(progress_throttle_state* state) {
-    state->last_update_time    = GetTickCount();
-    state->last_update_percent = -1;
-}
-
-BOOL throttle_should_update(progress_throttle_state* state, int current, int total) {
-    const DWORD now        = GetTickCount();
-    const DWORD elapsed_ms = now - state->last_update_time;
-    const int percent      = total > 0 ? (int)((current * 100.0) / total) : 0;
-    // Update if:
-    // 1. At least 50ms has passed AND percentage changed, OR
-    // 2. At least 200ms has passed (even if percentage didn't change)
-    const BOOL time_threshold = (elapsed_ms >= 50 && percent != state->last_update_percent) || (elapsed_ms >= 200);
-    if (time_threshold) {
-        state->last_update_time    = now;
-        state->last_update_percent = percent;
-        return TRUE;
-    }
-
-    return FALSE;
-}
-
-typedef struct {
-    int current;
-    int total;
-    wchar_t message[256];
+    UINT64 current;
+    UINT64 total;
+    wchar_t message[512];
 } progress_data;
 
-void report_progress(HWND hwnd, int current, int total, const wchar_t* msg) {
+static void send_progress_update(HWND hwnd, UINT64 current, UINT64 total, const wchar_t* message) {
     progress_data* data = (progress_data*)malloc(sizeof(progress_data));
     if (data) {
         data->current = current;
         data->total   = total;
-        if (msg) {
-            wcsncpy(data->message, msg, 255);
-            data->message[255] = L'\0';
+        if (message) {
+            wcsncpy_s(data->message, 512, message, _TRUNCATE);
         } else {
             data->message[0] = L'\0';
         }
@@ -675,20 +754,519 @@ void report_progress(HWND hwnd, int current, int total, const wchar_t* msg) {
     }
 }
 
-void report_complete(HWND hwnd, BOOL success, const wchar_t* msg) {
-    wchar_t* message = NULL;
-    if (msg) {
-        message = _wcsdup(msg);
+// IUnknown implementation
+static HRESULT STDMETHODCALLTYPE FileOpProgressSink_QueryInterface(IFileOperationProgressSink* This,
+                                                                   REFIID riid,
+                                                                   void** ppv) {
+    if (!ppv)
+        return E_POINTER;
+
+    if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID_IFileOperationProgressSink)) {
+        *ppv = This;
+        FileOpProgressSink_AddRef(This);
+        return S_OK;
     }
-    PostMessage(hwnd, WM_IO_COMPLETE, (WPARAM)success, (LPARAM)msg);
+
+    *ppv = NULL;
+    return E_NOINTERFACE;
 }
 
-void report_error(HWND hwnd, const wchar_t* msg) {
-    wchar_t* message = NULL;
-    if (msg) {
-        message = _wcsdup(msg);
+static ULONG STDMETHODCALLTYPE FileOpProgressSink_AddRef(IFileOperationProgressSink* This) {
+    file_op_progress_sink* sink = (file_op_progress_sink*)This;
+    return InterlockedIncrement(&sink->ref_count);
+}
+
+static ULONG STDMETHODCALLTYPE FileOpProgressSink_Release(IFileOperationProgressSink* This) {
+    file_op_progress_sink* sink = (file_op_progress_sink*)This;
+    LONG count                  = InterlockedDecrement(&sink->ref_count);
+    if (count == 0) {
+        DeleteCriticalSection(&sink->cs);
+        free(sink);
     }
-    PostMessage(hwnd, WM_IO_ERROR, 0, (LPARAM)msg);
+    return count;
+}
+
+// IFileOperationProgressSink implementation
+static HRESULT STDMETHODCALLTYPE FileOpProgressSink_StartOperations(IFileOperationProgressSink* This) {
+    file_op_progress_sink* sink = (file_op_progress_sink*)This;
+    EnterCriticalSection(&sink->cs);
+    sink->completed_size  = 0;
+    sink->completed_items = 0;
+    LeaveCriticalSection(&sink->cs);
+
+    send_progress_update(sink->main_window, 0, 100, sink->operation_name);
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE FileOpProgressSink_FinishOperations(IFileOperationProgressSink* This,
+                                                                     HRESULT hrResult) {
+    file_op_progress_sink* sink = (file_op_progress_sink*)This;
+
+    if (SUCCEEDED(hrResult)) {
+        send_progress_update(sink->main_window, 100, 100, L"Operation completed successfully");
+    }
+
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE FileOpProgressSink_PreDeleteItem(IFileOperationProgressSink* This,
+                                                                  DWORD dwFlags,
+                                                                  IShellItem* psiItem) {
+    file_op_progress_sink* sink = (file_op_progress_sink*)This;
+
+    if (sink->cancel_flag && *(sink->cancel_flag)) {
+        _INFO("Delete operation cancelled by user");
+        return E_ABORT;
+    }
+
+    LPWSTR display_name = NULL;
+    if (SUCCEEDED(psiItem->lpVtbl->GetDisplayName(psiItem, SIGDN_NORMALDISPLAY, &display_name))) {
+        wchar_t msg[512];
+        swprintf(msg, 512, L"Deleting: %s", display_name);
+
+        EnterCriticalSection(&sink->cs);
+        UINT64 percent = sink->item_count > 0 ? (sink->completed_items * 100) / sink->item_count : 0;
+        LeaveCriticalSection(&sink->cs);
+
+        send_progress_update(sink->main_window, percent, 100, msg);
+
+        CoTaskMemFree(display_name);
+    }
+
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE FileOpProgressSink_PostDeleteItem(
+  IFileOperationProgressSink* This, DWORD dwFlags, IShellItem* psiItem, HRESULT hrDelete, IShellItem* psiNewlyCreated) {
+    file_op_progress_sink* sink = (file_op_progress_sink*)This;
+
+    EnterCriticalSection(&sink->cs);
+    sink->completed_items++;
+    LeaveCriticalSection(&sink->cs);
+
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE FileOpProgressSink_PreMoveItem(IFileOperationProgressSink* This,
+                                                                DWORD dwFlags,
+                                                                IShellItem* psiItem,
+                                                                IShellItem* psiDestinationFolder,
+                                                                LPCWSTR pszNewName) {
+    file_op_progress_sink* sink = (file_op_progress_sink*)This;
+
+    if (sink->cancel_flag && *(sink->cancel_flag)) {
+        _INFO("Delete operation cancelled by user");
+        return E_ABORT;
+    }
+
+    LPWSTR display_name = NULL;
+    if (SUCCEEDED(psiItem->lpVtbl->GetDisplayName(psiItem, SIGDN_NORMALDISPLAY, &display_name))) {
+        wchar_t msg[512];
+        swprintf(msg, 512, L"Moving: %s", display_name);
+
+        EnterCriticalSection(&sink->cs);
+        UINT64 percent = sink->item_count > 0 ? (sink->completed_items * 100) / sink->item_count : 0;
+        LeaveCriticalSection(&sink->cs);
+
+        send_progress_update(sink->main_window, percent, 100, msg);
+
+        CoTaskMemFree(display_name);
+    }
+
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE FileOpProgressSink_PostMoveItem(IFileOperationProgressSink* This,
+                                                                 DWORD dwFlags,
+                                                                 IShellItem* psiItem,
+                                                                 IShellItem* psiDestinationFolder,
+                                                                 LPCWSTR pszNewName,
+                                                                 HRESULT hrMove,
+                                                                 IShellItem* psiNewlyCreated) {
+    file_op_progress_sink* sink = (file_op_progress_sink*)This;
+
+    EnterCriticalSection(&sink->cs);
+    sink->completed_items++;
+    LeaveCriticalSection(&sink->cs);
+
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE FileOpProgressSink_PreCopyItem(IFileOperationProgressSink* This,
+                                                                DWORD dwFlags,
+                                                                IShellItem* psiItem,
+                                                                IShellItem* psiDestinationFolder,
+                                                                LPCWSTR pszNewName) {
+    file_op_progress_sink* sink = (file_op_progress_sink*)This;
+
+    if (sink->cancel_flag && *(sink->cancel_flag)) {
+        _INFO("Delete operation cancelled by user");
+        return E_ABORT;
+    }
+
+    LPWSTR display_name = NULL;
+    if (SUCCEEDED(psiItem->lpVtbl->GetDisplayName(psiItem, SIGDN_NORMALDISPLAY, &display_name))) {
+        wchar_t msg[512];
+        swprintf(msg, 512, L"Copying: %s", display_name);
+
+        EnterCriticalSection(&sink->cs);
+        UINT64 percent = sink->item_count > 0 ? (sink->completed_items * 100) / sink->item_count : 0;
+        LeaveCriticalSection(&sink->cs);
+
+        send_progress_update(sink->main_window, percent, 100, msg);
+
+        CoTaskMemFree(display_name);
+    }
+
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE FileOpProgressSink_PostCopyItem(IFileOperationProgressSink* This,
+                                                                 DWORD dwFlags,
+                                                                 IShellItem* psiItem,
+                                                                 IShellItem* psiDestinationFolder,
+                                                                 LPCWSTR pszNewName,
+                                                                 HRESULT hrCopy,
+                                                                 IShellItem* psiNewlyCreated) {
+    file_op_progress_sink* sink = (file_op_progress_sink*)This;
+
+    EnterCriticalSection(&sink->cs);
+    sink->completed_items++;
+    LeaveCriticalSection(&sink->cs);
+
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE FileOpProgressSink_UpdateProgress(IFileOperationProgressSink* This,
+                                                                   UINT iWorkTotal,
+                                                                   UINT iWorkSoFar) {
+    file_op_progress_sink* sink = (file_op_progress_sink*)This;
+
+    if (iWorkTotal > 0) {
+        UINT64 percent = (iWorkSoFar * 100) / iWorkTotal;
+        send_progress_update(sink->main_window, percent, 100, NULL);
+    }
+
+    return S_OK;
+}
+
+// Stub implementations for other callbacks
+static HRESULT STDMETHODCALLTYPE FileOpProgressSink_PreRenameItem(IFileOperationProgressSink* This,
+                                                                  DWORD dwFlags,
+                                                                  IShellItem* psiItem,
+                                                                  LPCWSTR pszNewName) {
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE FileOpProgressSink_PostRenameItem(IFileOperationProgressSink* This,
+                                                                   DWORD dwFlags,
+                                                                   IShellItem* psiItem,
+                                                                   LPCWSTR pszNewName,
+                                                                   HRESULT hrRename,
+                                                                   IShellItem* psiNewlyCreated) {
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE FileOpProgressSink_PreNewItem(IFileOperationProgressSink* This,
+                                                               DWORD dwFlags,
+                                                               IShellItem* psiDestinationFolder,
+                                                               LPCWSTR pszNewName) {
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE FileOpProgressSink_PostNewItem(IFileOperationProgressSink* This,
+                                                                DWORD dwFlags,
+                                                                IShellItem* psiDestinationFolder,
+                                                                LPCWSTR pszNewName,
+                                                                LPCWSTR pszTemplateName,
+                                                                DWORD dwFileAttributes,
+                                                                HRESULT hrNew,
+                                                                IShellItem* psiNewItem) {
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE FileOpProgressSink_ResetTimer(IFileOperationProgressSink* This) {
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE FileOpProgressSink_PauseTimer(IFileOperationProgressSink* This) {
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE FileOpProgressSink_ResumeTimer(IFileOperationProgressSink* This) {
+    return S_OK;
+}
+
+static file_op_progress_sink*
+FileOpProgressSink_Create(HWND hwnd, const wchar_t* operation_name, DWORD item_count, volatile BOOL* cancel_flag) {
+    file_op_progress_sink* sink = (file_op_progress_sink*)malloc(sizeof(file_op_progress_sink));
+    if (!sink)
+        return NULL;
+
+    sink->sink.lpVtbl       = &file_op_progress_sink_vtable;
+    sink->ref_count         = 1;
+    sink->main_window       = hwnd;
+    sink->total_size        = 0;
+    sink->completed_size    = 0;
+    sink->current_item_size = 0;
+    sink->item_count        = item_count;
+    sink->completed_items   = 0;
+    sink->cancel_flag       = cancel_flag;
+
+    InitializeCriticalSection(&sink->cs);
+
+    if (operation_name) {
+        wcsncpy_s(sink->operation_name, 256, operation_name, _TRUNCATE);
+    } else {
+        wcscpy_s(sink->operation_name, 256, L"Processing files");
+    }
+
+    return sink;
+}
+
+#pragma endregion
+
+//===================================================================//
+//                      -- FILE OPERATIONS --                        //
+//===================================================================//
+
+#pragma region file operations
+
+static HRESULT delete_path_ifileop(HWND hwnd, const wchar_t* path, BOOL to_recycle_bin) {
+    IFileOperation* file_op = NULL;
+    IShellItem* item        = NULL;
+
+    HRESULT hr = CoCreateInstance(&CLSID_FileOperation, NULL, CLSCTX_ALL, &IID_IFileOperation, (void**)&file_op);
+    if (FAILED(hr)) {
+        _ERROR("Failed to create IFileOperation instance: 0x%08X", hr);
+        return hr;
+    }
+
+    DWORD flags = FOF_NOCONFIRMATION | FOF_NOERRORUI;
+    if (!to_recycle_bin) {
+        flags |= FOF_NO_UI;  // Silent delete without recycle bin
+    } else {
+        flags |= FOF_ALLOWUNDO;  // Use recycle bin
+    }
+
+    hr = file_op->lpVtbl->SetOperationFlags(file_op, flags);
+    if (FAILED(hr)) {
+        _ERROR("Failed to set operation flags: 0x%08X", hr);
+        file_op->lpVtbl->Release(file_op);
+        return hr;
+    }
+
+    file_op_progress_sink* progress_sink =
+      FileOpProgressSink_Create(hwnd, L"Deleting items", 1, &IO_STATE.cancel_requested);
+
+    if (progress_sink) {
+        DWORD cookie;
+        file_op->lpVtbl->Advise(file_op, (IFileOperationProgressSink*)progress_sink, &cookie);
+    }
+
+    hr = SHCreateItemFromParsingName(path, NULL, &IID_IShellItem, (void**)&item);
+    if (FAILED(hr)) {
+        _ERROR("Failed to create shell item from path '%ls': 0x%08X", path, hr);
+        if (progress_sink) {
+            progress_sink->sink.lpVtbl->Release((IFileOperationProgressSink*)progress_sink);
+        }
+        file_op->lpVtbl->Release(file_op);
+        return hr;
+    }
+
+    hr = file_op->lpVtbl->DeleteItem(file_op, item, NULL);
+    item->lpVtbl->Release(item);
+
+    if (FAILED(hr)) {
+        _ERROR("Failed to queue delete operation: 0x%08X", hr);
+        if (progress_sink) {
+            progress_sink->sink.lpVtbl->Release((IFileOperationProgressSink*)progress_sink);
+        }
+        file_op->lpVtbl->Release(file_op);
+        return hr;
+    }
+
+    hr = file_op->lpVtbl->PerformOperations(file_op);
+
+    if (progress_sink) {
+        progress_sink->sink.lpVtbl->Release((IFileOperationProgressSink*)progress_sink);
+    }
+    file_op->lpVtbl->Release(file_op);
+
+    if (hr == E_ABORT) {
+        _INFO("Operation aborted by user request");
+    } else if (FAILED(hr)) {
+        _ERROR("Failed to perform delete operation: 0x%08X", hr);
+    }
+
+    return hr;
+}
+
+static HRESULT move_path_ifileop(HWND hwnd, const wchar_t* src_path, const wchar_t* dest_path) {
+    IFileOperation* file_op = NULL;
+    IShellItem* src_item    = NULL;
+    IShellItem* dest_folder = NULL;
+
+    wchar_t dest_folder_path[MAX_PATH];
+    wchar_t dest_name[MAX_PATH];
+
+    // Split destination into folder and name
+    wcscpy_s(dest_folder_path, MAX_PATH, dest_path);
+    PathRemoveFileSpecW(dest_folder_path);
+    wcscpy_s(dest_name, MAX_PATH, PathFindFileNameW(dest_path));
+
+    HRESULT hr = CoCreateInstance(&CLSID_FileOperation, NULL, CLSCTX_ALL, &IID_IFileOperation, (void**)&file_op);
+    if (FAILED(hr)) {
+        _ERROR("Failed to create IFileOperation instance: 0x%08X", hr);
+        return hr;
+    }
+
+    hr = file_op->lpVtbl->SetOperationFlags(file_op, FOF_NOCONFIRMATION | FOF_NOERRORUI);
+    if (FAILED(hr)) {
+        _ERROR("Failed to set operation flags: 0x%08X", hr);
+        file_op->lpVtbl->Release(file_op);
+        return hr;
+    }
+
+    file_op_progress_sink* progress_sink =
+      FileOpProgressSink_Create(hwnd, L"Moving items", 1, &IO_STATE.cancel_requested);
+
+    if (progress_sink) {
+        DWORD cookie;
+        file_op->lpVtbl->Advise(file_op, (IFileOperationProgressSink*)progress_sink, &cookie);
+    }
+
+    hr = SHCreateItemFromParsingName(src_path, NULL, &IID_IShellItem, (void**)&src_item);
+    if (FAILED(hr)) {
+        _ERROR("Failed to create source shell item: 0x%08X", hr);
+        if (progress_sink) {
+            progress_sink->sink.lpVtbl->Release((IFileOperationProgressSink*)progress_sink);
+        }
+        file_op->lpVtbl->Release(file_op);
+        return hr;
+    }
+
+    hr = SHCreateItemFromParsingName(dest_folder_path, NULL, &IID_IShellItem, (void**)&dest_folder);
+    if (FAILED(hr)) {
+        _ERROR("Failed to create destination shell item: 0x%08X", hr);
+        src_item->lpVtbl->Release(src_item);
+        if (progress_sink) {
+            progress_sink->sink.lpVtbl->Release((IFileOperationProgressSink*)progress_sink);
+        }
+        file_op->lpVtbl->Release(file_op);
+        return hr;
+    }
+
+    hr = file_op->lpVtbl->MoveItem(file_op, src_item, dest_folder, dest_name, NULL);
+    src_item->lpVtbl->Release(src_item);
+    dest_folder->lpVtbl->Release(dest_folder);
+
+    if (FAILED(hr)) {
+        _ERROR("Failed to queue move operation: 0x%08X", hr);
+        if (progress_sink) {
+            progress_sink->sink.lpVtbl->Release((IFileOperationProgressSink*)progress_sink);
+        }
+        file_op->lpVtbl->Release(file_op);
+        return hr;
+    }
+
+    hr = file_op->lpVtbl->PerformOperations(file_op);
+
+    if (progress_sink) {
+        progress_sink->sink.lpVtbl->Release((IFileOperationProgressSink*)progress_sink);
+    }
+    file_op->lpVtbl->Release(file_op);
+
+    if (hr == E_ABORT) {
+        _INFO("Operation aborted by user request");
+    } else if (FAILED(hr)) {
+        _ERROR("Failed to perform delete operation: 0x%08X", hr);
+    }
+
+    return hr;
+}
+
+static HRESULT copy_path_ifileop(HWND hwnd, const wchar_t* src_path, const wchar_t* dest_path) {
+    IFileOperation* file_op = NULL;
+    IShellItem* src_item    = NULL;
+    IShellItem* dest_folder = NULL;
+
+    wchar_t dest_folder_path[MAX_PATH];
+    wchar_t dest_name[MAX_PATH];
+
+    wcscpy_s(dest_folder_path, MAX_PATH, dest_path);
+    PathRemoveFileSpecW(dest_folder_path);
+    wcscpy_s(dest_name, MAX_PATH, PathFindFileNameW(dest_path));
+
+    HRESULT hr = CoCreateInstance(&CLSID_FileOperation, NULL, CLSCTX_ALL, &IID_IFileOperation, (void**)&file_op);
+    if (FAILED(hr)) {
+        _ERROR("Failed to create IFileOperation instance: 0x%08X", hr);
+        return hr;
+    }
+
+    hr = file_op->lpVtbl->SetOperationFlags(file_op, FOF_NOCONFIRMATION | FOF_NOERRORUI);
+    if (FAILED(hr)) {
+        _ERROR("Failed to set operation flags: 0x%08X", hr);
+        file_op->lpVtbl->Release(file_op);
+        return hr;
+    }
+
+    file_op_progress_sink* progress_sink =
+      FileOpProgressSink_Create(hwnd, L"Copying items", 1, &IO_STATE.cancel_requested);
+
+    if (progress_sink) {
+        DWORD cookie;
+        file_op->lpVtbl->Advise(file_op, (IFileOperationProgressSink*)progress_sink, &cookie);
+    }
+
+    hr = SHCreateItemFromParsingName(src_path, NULL, &IID_IShellItem, (void**)&src_item);
+    if (FAILED(hr)) {
+        _ERROR("Failed to create source shell item: 0x%08X", hr);
+        if (progress_sink) {
+            progress_sink->sink.lpVtbl->Release((IFileOperationProgressSink*)progress_sink);
+        }
+        file_op->lpVtbl->Release(file_op);
+        return hr;
+    }
+
+    hr = SHCreateItemFromParsingName(dest_folder_path, NULL, &IID_IShellItem, (void**)&dest_folder);
+    if (FAILED(hr)) {
+        _ERROR("Failed to create destination shell item: 0x%08X", hr);
+        src_item->lpVtbl->Release(src_item);
+        if (progress_sink) {
+            progress_sink->sink.lpVtbl->Release((IFileOperationProgressSink*)progress_sink);
+        }
+        file_op->lpVtbl->Release(file_op);
+        return hr;
+    }
+
+    hr = file_op->lpVtbl->CopyItem(file_op, src_item, dest_folder, dest_name, NULL);
+    src_item->lpVtbl->Release(src_item);
+    dest_folder->lpVtbl->Release(dest_folder);
+
+    if (FAILED(hr)) {
+        _ERROR("Failed to queue copy operation: 0x%08X", hr);
+        if (progress_sink) {
+            progress_sink->sink.lpVtbl->Release((IFileOperationProgressSink*)progress_sink);
+        }
+        file_op->lpVtbl->Release(file_op);
+        return hr;
+    }
+
+    hr = file_op->lpVtbl->PerformOperations(file_op);
+
+    if (progress_sink) {
+        progress_sink->sink.lpVtbl->Release((IFileOperationProgressSink*)progress_sink);
+    }
+    file_op->lpVtbl->Release(file_op);
+
+    if (hr == E_ABORT) {
+        _INFO("Operation aborted by user request");
+    } else if (FAILED(hr)) {
+        _ERROR("Failed to perform delete operation: 0x%08X", hr);
+    }
+
+    return hr;
 }
 
 #pragma endregion
@@ -843,134 +1421,6 @@ BOOL has_extension(const char* filename, const char* ext) {
     if (_STREQ(extension, ext))
         return TRUE;
     return FALSE;
-}
-
-BOOL rm_rf_recursive(const wchar_t* path) {
-    wchar_t* search_path = join_paths_wide(path, L"*");
-    if (!search_path)
-        return FALSE;
-
-    WIN32_FIND_DATAW find_data;
-    const HANDLE h_find = FindFirstFileW(search_path, &find_data);
-
-    if (h_find == INVALID_HANDLE_VALUE) {
-        return FALSE;
-    }
-
-    BOOL success = TRUE;
-    do {
-        if (wcscmp(find_data.cFileName, L".") == 0 || wcscmp(find_data.cFileName, L"..") == 0) {
-            continue;
-        }
-
-        wchar_t* full_path = join_paths_wide(path, find_data.cFileName);
-        if (!full_path) {
-            success = FALSE;
-            break;
-        }
-
-        if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-            if (!rm_rf_recursive(full_path)) {
-                success = FALSE;
-            }
-        } else {
-            SetFileAttributesW(full_path, FILE_ATTRIBUTE_NORMAL);
-            if (!DeleteFileW(full_path)) {
-                _ERROR("Failed to delete file: %ls (Error: %lu)", full_path, GetLastError());
-                success = FALSE;
-            }
-        }
-
-        if (!success)
-            break;
-
-    } while (FindNextFileW(h_find, &find_data));
-
-    FindClose(h_find);
-
-    if (success) {
-        if (!RemoveDirectoryW(path)) {
-            _ERROR("Failed to remove directory: %ls (Error: %lu)", path, GetLastError());
-            success = FALSE;
-        }
-    }
-
-    return success;
-}
-
-BOOL rm_rf(const wchar_t* directory) {
-    if (!directory)
-        return FALSE;
-    return rm_rf_recursive(directory);
-}
-
-BOOL copy_directory_recursive(const wchar_t* src, const wchar_t* dst) {
-    if (!CreateDirectoryW(dst, NULL)) {
-        if (GetLastError() != ERROR_ALREADY_EXISTS) {
-            _ERROR("Failed to create directory: %ls (Error: %lu)", dst, GetLastError());
-            return FALSE;
-        }
-    }
-
-    wchar_t* search_path = join_paths_wide(src, L"*");
-    if (!search_path)
-        return FALSE;
-
-    WIN32_FIND_DATAW find_data;
-    const HANDLE h_find = FindFirstFileW(search_path, &find_data);
-
-    if (h_find == INVALID_HANDLE_VALUE) {
-        _ERROR("FindFirstFileW failed for: %ls (Error: %lu)", src, GetLastError());
-        return FALSE;
-    }
-
-    BOOL success = TRUE;
-    do {
-        // Skip . and ..
-        if (wcscmp(find_data.cFileName, L".") == 0 || wcscmp(find_data.cFileName, L"..") == 0) {
-            continue;
-        }
-
-        wchar_t* src_path = join_paths_wide(src, find_data.cFileName);
-        wchar_t* dst_path = join_paths_wide(dst, find_data.cFileName);
-
-        if (!src_path || !dst_path) {
-            success = FALSE;
-            break;
-        }
-
-        if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-            if (!copy_directory_recursive(src_path, dst_path)) {
-                _ERROR("Failed to copy subdirectory: %ls", src_path);
-                success = FALSE;
-            }
-        } else {
-            COPYFILE2_EXTENDED_PARAMETERS params = {0};
-            params.dwSize                        = sizeof(params);
-            params.dwCopyFlags                   = COPY_FILE_NO_BUFFERING;
-
-            const HRESULT hr = CopyFile2(src_path, dst_path, &params);
-            if (FAILED(hr)) {
-                _ERROR("Failed to copy file: %ls to %ls (HRESULT: 0x%08X)", src_path, dst_path, hr);
-                success = FALSE;
-            }
-        }
-
-        if (!success)
-            break;
-
-    } while (FindNextFileW(h_find, &find_data));
-
-    FindClose(h_find);
-    return success;
-}
-
-BOOL copy_directory(const char* src, const char* dst) {
-    wchar_t* src_w = make_long_path(src);
-    wchar_t* dst_w = make_long_path(dst);
-    if (!src_w || !dst_w)
-        return FALSE;
-    return copy_directory_recursive(src_w, dst_w);
 }
 
 BOOL list_contains(char* haystack[], const int haystack_size, const char* needle) {
@@ -1187,159 +1637,6 @@ BOOL remove_registry_keys(const char* key) {
     }
 
     return TRUE;
-}
-
-BOOL remove_xml_file(const char* name) {
-    char* filename =
-      strpool_sprintf("C:\\Program Files\\Common Files\\Native Instruments\\Service Center\\%s.xml", name);
-
-    if (file_exists(filename)) {
-        if (BACKUP_FILES) {
-            const char* bak_filename = strpool_sprintf("%s.bak", filename);
-            if (!CopyFileExA(filename, bak_filename, NULL, NULL, NULL, 0)) {
-                _ERROR("Failed to backup XML file: '%s'", filename);
-                return FALSE;
-            }
-        }
-
-        if (!DeleteFileA(filename)) {
-            _ERROR("Failed to delete XML file: '%s'", filename);
-            return FALSE;
-        }
-
-        _INFO("Deleted XML file: '%s'", filename);
-    }
-
-    return TRUE;
-}
-
-BOOL remove_all_files_in_dir(const char* directory, BOOL backup) {
-    WIN32_FIND_DATA find_data;
-    HANDLE h_find = INVALID_HANDLE_VALUE;
-    char search_path[MAX_PATH];
-    char file_path[MAX_PATH];
-
-    snprintf(search_path, MAX_PATH, "%s\\*", directory);
-    h_find = FindFirstFile(search_path, &find_data);
-    if (h_find != INVALID_HANDLE_VALUE) {
-        do {
-            // Skip the special directory entries '.' and '..'
-            if (strcmp(find_data.cFileName, ".") != 0 && strcmp(find_data.cFileName, "..") != 0) {
-                snprintf(file_path, MAX_PATH, "%s\\%s", directory, find_data.cFileName);
-
-                if (!(find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-                    if (backup) {
-                        char* bak_filename = join_str(file_path, ".bak");
-                        if (file_exists(bak_filename)) {
-                            const BOOL deleted = DeleteFileA(bak_filename);
-                            if (!deleted) {
-                                _ERROR("Failed to delete file: '%s'", bak_filename);
-                                return FALSE;
-                            }
-                        }
-                        const BOOL copied = CopyFileExA(file_path, bak_filename, NULL, NULL, NULL, 0);
-                        if (!copied) {
-                            _ERROR("Failed to backup file: '%s'", file_path);
-                            return FALSE;
-                        }
-                    }
-
-                    if (!DeleteFile(file_path)) {
-                        _ERROR("Failed to delete file: '%s'", file_path);
-                        return FALSE;
-                    } else {
-                        _INFO("Deleted file: '%s'", file_path);
-                    }
-                }
-            }
-        } while (FindNextFile(h_find, &find_data) != 0);
-        FindClose(h_find);
-    }
-
-    return TRUE;
-}
-
-BOOL remove_cache_files(void) {
-    const char* cache_path = join_paths(get_local_appdata_path(), _LIB_CACHE_ROOT);
-    return remove_all_files_in_dir(cache_path, BACKUP_FILES);
-}
-
-BOOL remove_db3(void) {
-    const char* appdata_local = get_local_appdata_path();
-    const char* db3           = join_paths(appdata_local, _DB3_ROOT);
-    if (file_exists(db3)) {
-        if (BACKUP_FILES) {
-            const char* db3_bak = join_str(db3, ".bak");
-            if (!CopyFileExA(db3, db3_bak, NULL, NULL, NULL, 0)) {
-                _ERROR("Failed to backup komplete.db3");
-                return FALSE;
-            }
-            _INFO("Backed up komplete.db3");
-        }
-
-        if (!DeleteFileA(db3)) {
-            _ERROR("Failed to delete komplete.db3");
-            return FALSE;
-        } else {
-            _INFO("Deleted komplete.db3");
-        }
-    }
-
-    return TRUE;
-}
-
-BOOL remove_ras3_jwt(void) {
-    return remove_all_files_in_dir(_RAS3_ROOT, BACKUP_FILES);
-}
-
-BOOL remove_library(const library_entry* library, BOOL remove_content) {
-    _ASSERT(library != NULL);
-    _ASSERT(library->name != NULL);
-    _ASSERT(library->content_dir != NULL);
-
-    for (int i = 0; i < LIB_COUNT; i++) {
-        const library_entry* entry = &LIBRARIES[i];
-        if (_STREQ(entry->name, library->name)) {
-            return FALSE;
-        }
-    }
-
-    BOOL result = remove_registry_keys(library->name);
-    if (!result)
-        return FALSE;
-
-    result = remove_xml_file(library->name);
-    if (!result)
-        return FALSE;
-
-    result = remove_cache_files();
-    if (!result)
-        return FALSE;
-
-    result = remove_db3();
-    if (!result)
-        return FALSE;
-
-    result = remove_ras3_jwt();
-    if (!result)
-        return FALSE;
-
-    if (remove_content && library->content_dir != NULL && directory_exists(library->content_dir)) {
-        result = rm_rf(make_long_path(library->content_dir));
-        if (!result)
-            return FALSE;
-    }
-
-    _INFO("Finished removing library: '%s'", library->name);
-
-    return TRUE;
-}
-
-BOOL remove_selected_library(void) {
-    if (SELECTED_INDEX == -1)
-        return FALSE;
-
-    return remove_library(&LIBRARIES[SELECTED_INDEX], REMOVE_CONTENT_DIR);
 }
 
 // Extract tag name from GitHub json response
@@ -1594,205 +1891,118 @@ BOOL open_folder_dialog(HWND owner, char* dst, int len) {
 
 #pragma region threaded operations
 
-BOOL thread_check_cancel_and_progress(
-  HWND hwnd, progress_throttle_state* state, int current, int total, const wchar_t* msg) {
-    if (io_state_should_cancel())
-        return FALSE;
-    if (throttle_should_update(state, current, total))
-        report_progress(hwnd, current, total, msg);
-    return TRUE;
-}
+typedef struct {
+    HWND hwnd;
+    const char* library_name;
+    const wchar_t* content_dir;
+} delete_library_thread_params;
 
 typedef struct {
     HWND hwnd;
-    library_entry* libraries;
-    size_t lib_count;
-    BOOL backup_cache;
-    BOOL remove_content;
-} remove_thread_params;
+    const char* library_name;
+    const wchar_t* content_dir;
+    const wchar_t* new_content_dir;
+} relocate_library_thread_params;
 
-typedef struct {
-    HWND hwnd;
-    library_entry* library;
-    const char* new_path;
-} relocate_thread_params;
+static UINT __stdcall delete_library_thread_proc(void* param) {
+    delete_library_thread_params* params = (delete_library_thread_params*)param;
+    if (!params)
+        return 1;
 
-typedef struct {
-    HWND hwnd;
-} thread_params;
+    // Dispatch threaded file operations
+    HRESULT hr = delete_path_ifileop(params->hwnd, params->content_dir, TRUE);
 
-UINT __stdcall remove_worker_thread(void* param) {
-    remove_thread_params* params = (remove_thread_params*)param;
+    io_state_end_operation();
 
-    if (params->lib_count > 1) {
-        // Remove multiple libraries
-        for (int i = 0; i < params->lib_count; i++) {
-            wchar_t msg[256];
-            swprintf(msg, 256, L"Removing library %zu of %zu...", i + 1, params->lib_count);
-            report_progress(params->hwnd, (int)i, (int)params->lib_count, msg);
-
-            const BOOL removed = remove_library(params->libraries + i, params->remove_content);
-            if (!removed) {
-                report_error(params->hwnd, L"Failed to remove library");
-            }
-        }
-
-        report_complete(params->hwnd, TRUE, L"Libraries removed successfully");
+    if (hr == E_ABORT) {
+        wchar_t* msg = _wcsdup(L"Operation cancelled by user.");
+        PostMessage(params->hwnd, WM_IO_COMPLETE, FALSE, (LPARAM)msg);
+    } else if (SUCCEEDED(hr)) {
+        wchar_t* msg = _wcsdup(L"Files deleted successfully!");
+        PostMessage(params->hwnd, WM_IO_COMPLETE, TRUE, (LPARAM)msg);
     } else {
-        // Remove single library
-        report_progress(params->hwnd, 0, 1, L"Removing selected library...");
-
-        const BOOL removed = remove_library(params->libraries, params->remove_content);
-        if (!removed) {
-            report_error(params->hwnd, L"Failed to remove library");
-        }
-
-        report_complete(params->hwnd, TRUE, L"Library removed successfully");
+        wchar_t* error = _wcsdup(L"Failed to delete files.");
+        PostMessage(params->hwnd, WM_IO_ERROR, 0, (LPARAM)error);
     }
 
     free(params);
-    io_state_end();
-
     return 0;
 }
 
-UINT __stdcall relocate_worker_thread(void* param) {
-    relocate_thread_params* params = (relocate_thread_params*)param;
+static UINT __stdcall relocate_library_thread_proc(void* param) {
+    relocate_library_thread_params* params = (relocate_library_thread_params*)param;
+    if (!params)
+        return 1;
 
-    report_progress(params->hwnd, 0, 1, L"Relocating library...");
+    // Dispatch threaded file operations
+    HRESULT hr;
 
-    const char* new_path_full = join_paths(params->new_path, params->library->name);
+    io_state_end_operation();
 
-    if (!copy_directory(params->library->content_dir, new_path_full)) {
-        report_error(params->hwnd, L"Failed to copy original content directory to new location");
+    if (hr == E_ABORT) {
+        wchar_t* msg = _wcsdup(L"Operation cancelled by user.");
+        PostMessage(params->hwnd, WM_IO_COMPLETE, FALSE, (LPARAM)msg);
+    } else if (SUCCEEDED(hr)) {
+        wchar_t* msg = _wcsdup(L"Files deleted successfully!");
+        PostMessage(params->hwnd, WM_IO_COMPLETE, TRUE, (LPARAM)msg);
+    } else {
+        wchar_t* error = _wcsdup(L"Failed to delete files.");
+        PostMessage(params->hwnd, WM_IO_ERROR, 0, (LPARAM)error);
     }
 
-    if (!rm_rf(make_long_path(params->library->content_dir))) {
-        report_error(params->hwnd, L"Failed to delete original content directory");
-    }
-
-    HKEY regkey;
-    const char* key_path = join_paths("SOFTWARE\\Native Instruments", params->library->name);
-    const BOOL open      = open_registry_key(&regkey, HKEY_LOCAL_MACHINE, key_path, KEY_SET_VALUE);
-    if (open) {
-        if (!set_registry_value_str(regkey, "ContentDir", new_path_full)) {
-            report_error(params->hwnd, L"Failed to update registry ContentDir value");
-        }
-    }
-    close_registry_key(&regkey);
-
-    report_complete(params->hwnd, TRUE, L"Library relocated successfully");
     free(params);
-
-    io_state_end();
     return 0;
 }
 
-UINT __stdcall test_worker_thread(void* param) {
-    thread_params* params = (thread_params*)param;
+void start_delete_library_operation(
+  HWND hwnd, const char* library_name, const wchar_t* content_dir, BOOL backup, BOOL remove_content) {
+    delete_library_thread_params* params = (delete_library_thread_params*)malloc(sizeof(delete_library_thread_params));
+    if (!params)
+        return;
 
-    progress_throttle_state throttle;
-    throttle_init(&throttle);
+    params->hwnd         = hwnd;
+    params->library_name = library_name;
+    params->content_dir  = content_dir;
 
-    const int total = 1e6;
-    for (int i = 0; i < total; i++) {
-        if (!thread_check_cancel_and_progress(params->hwnd, &throttle, i, total, L"Processing...")) {
-            report_complete(params->hwnd, FALSE, L"Operation cancelled");
+    const UINT_PTR thread_handle = _beginthreadex(NULL, 0, delete_library_thread_proc, (void*)params, 0, NULL);
+    if (thread_handle) {
+        const HANDLE handle = (HANDLE)thread_handle;
+        if (!io_state_try_start_operation(handle)) {
+            CloseHandle(handle);
             free(params);
-            io_state_end();
-            return 1;
+            MessageBoxW(hwnd, L"Failed to start operation.", L"Error", MB_OK | MB_ICONERROR);
         }
-
-        printf("%d\n", i);
-    }
-
-    report_progress(params->hwnd, total, total, L"Complete!");
-    report_complete(params->hwnd, TRUE, L"Test finished successfully!");
-
-    free(params);
-    io_state_end();
-
-    return 0;
-}
-
-void start_remove_operation(HWND hwnd, library_entry* libs, size_t lib_count, BOOL backup, BOOL remove_content) {
-    if (!io_state_try_begin(IO_STATE_REMOVING)) {
-        MessageBox(hwnd, "Another operation is in progress. Please wait...", "Busy", MB_OK | MB_ICONWARNING);
-        return;
-    }
-
-    remove_thread_params* params = malloc(sizeof(remove_thread_params));
-    if (!params) {
-        io_state_end();
-        MessageBox(hwnd, "Failed to allocate memory for operation", "Error", MB_OK | MB_ICONERROR);
-        return;
-    }
-
-    params->hwnd           = hwnd;
-    params->libraries      = libs;
-    params->lib_count      = lib_count;
-    params->remove_content = remove_content;
-    params->backup_cache   = backup;
-
-    const HANDLE thread = (HANDLE)_beginthreadex(NULL, 0, remove_worker_thread, params, 0, NULL);
-    if (thread) {
-        io_state_set_thread(thread);
     } else {
         free(params);
-        io_state_end();
-        MessageBox(hwnd, "Failed to start operation thread", "Error", MB_OK | MB_ICONERROR);
+        MessageBoxW(hwnd, L"Failed to create thread.", L"Error", MB_OK | MB_ICONERROR);
     }
 }
 
-void start_relocate_operation(HWND hwnd, library_entry* lib, const char* new_path) {
-    if (!io_state_try_begin(IO_STATE_RELOCATING)) {
-        MessageBox(hwnd, "Another operation is in progress. Please wait...", "Busy", MB_OK | MB_ICONWARNING);
+void start_relocate_library_operation(HWND hwnd,
+                                      const char* library_name,
+                                      const wchar_t* content_dir,
+                                      const wchar_t* new_content_dir) {
+    relocate_library_thread_params* params =
+      (relocate_library_thread_params*)malloc(sizeof(relocate_library_thread_params));
+    if (!params)
         return;
-    }
 
-    relocate_thread_params* params = malloc(sizeof(relocate_thread_params));
-    if (!params) {
-        io_state_end();
-        MessageBox(hwnd, "Failed to allocate memory for operation", "Error", MB_OK | MB_ICONERROR);
-        return;
-    }
+    params->hwnd            = hwnd;
+    params->library_name    = library_name;
+    params->content_dir     = content_dir;
+    params->new_content_dir = new_content_dir;
 
-    params->hwnd     = hwnd;
-    params->library  = lib;
-    params->new_path = new_path;
-
-    const HANDLE thread = (HANDLE)_beginthreadex(NULL, 0, relocate_worker_thread, params, 0, NULL);
-    if (thread) {
-        io_state_set_thread(thread);
+    const UINT_PTR thread_handle = _beginthreadex(NULL, 0, relocate_library_thread_proc, (void*)params, 0, NULL);
+    if (thread_handle) {
+        const HANDLE handle = (HANDLE)thread_handle;
+        if (!io_state_try_start_operation(handle)) {
+            CloseHandle(handle);
+            free(params);
+            MessageBoxW(hwnd, L"Failed to start operation.", L"Error", MB_OK | MB_ICONERROR);
+        }
     } else {
         free(params);
-        io_state_end();
-        MessageBox(hwnd, "Failed to start operation thread", "Error", MB_OK | MB_ICONERROR);
-    }
-}
-
-void start_test_operation(HWND hwnd) {
-    if (!io_state_try_begin(IO_STATE_RELOCATING)) {
-        MessageBox(hwnd, "Another operation is in progress. Please wait...", "Busy", MB_OK | MB_ICONWARNING);
-        return;
-    }
-
-    thread_params* params = malloc(sizeof(thread_params));
-    if (!params) {
-        io_state_end();
-        MessageBox(hwnd, "Failed to allocate memory for operation", "Error", MB_OK | MB_ICONERROR);
-        return;
-    }
-
-    params->hwnd = hwnd;
-
-    const HANDLE thread = (HANDLE)_beginthreadex(NULL, 0, test_worker_thread, params, 0, NULL);
-    if (thread) {
-        io_state_set_thread(thread);
-    } else {
-        free(params);
-        io_state_end();
-        MessageBox(hwnd, "Failed to start operation thread", "Error", MB_OK | MB_ICONERROR);
+        MessageBoxW(hwnd, L"Failed to create thread.", L"Error", MB_OK | MB_ICONERROR);
     }
 }
 
@@ -1925,8 +2135,12 @@ progress_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam, UINT_PTR id_sub
                         if (io_state_is_busy()) {
                             io_state_request_cancel();
 
-                            if (IO_STATE.thread_handle) {
-                                WaitForSingleObject(IO_STATE.thread_handle, 2000);
+                            EnterCriticalSection(&IO_STATE.cs);
+                            const HANDLE thread = IO_STATE.thread_handle;
+                            LeaveCriticalSection(&IO_STATE.cs);
+
+                            if (thread) {
+                                WaitForSingleObject(thread, 2000);  // 2 second timeout
                             }
                         }
                     }
@@ -2492,7 +2706,7 @@ INT_PTR CALLBACK relocate_dialog_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARA
 #pragma region wndproc callbacks
 
 LRESULT on_create(HWND hwnd) {
-    io_state_init(hwnd);
+    io_state_init();
 
     UI_FONT = CreateFont(16,
                          0,
@@ -2574,6 +2788,11 @@ void on_selection_changed(HWND hwnd) {
 }
 
 void on_remove_selected(HWND hwnd) {
+    if (io_state_is_busy()) {
+        MessageBoxW(hwnd, L"Please wait for current operation to complete.", L"Busy", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+
     BACKUP_FILES       = _IS_CHECKED(IDC_CHECKBOX_BACKUP);
     REMOVE_CONTENT_DIR = _IS_CHECKED(IDC_CHECKBOX_REMOVE_LIB_FOLDER);
 
@@ -2590,16 +2809,22 @@ void on_remove_selected(HWND hwnd) {
                                           (LPARAM)&data);
 
     if (result == IDREMOVE) {
-        BACKUP_FILES       = data.backup_files;
-        REMOVE_CONTENT_DIR = data.remove_content_dir;
-        library_entry* lib = &LIBRARIES[SELECTED_INDEX];
-        start_remove_operation(hwnd, lib, 1, BACKUP_FILES, REMOVE_CONTENT_DIR);
+        BACKUP_FILES             = data.backup_files;
+        REMOVE_CONTENT_DIR       = data.remove_content_dir;
+        const library_entry* lib = &LIBRARIES[SELECTED_INDEX];
+        start_delete_library_operation(hwnd,
+                                       lib->name,
+                                       make_long_path(lib->content_dir),
+                                       BACKUP_FILES,
+                                       REMOVE_CONTENT_DIR);
     }
 }
 
 void on_remove_all(HWND hwnd) {
-    start_test_operation(hwnd);
-    return;
+    if (io_state_is_busy()) {
+        MessageBoxW(hwnd, L"Please wait for current operation to complete.", L"Busy", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
 
     if (LIB_COUNT == 0) {
         MessageBox(hwnd, "No libraries found to remove.", "No Libraries", MB_OK | MB_ICONINFORMATION);
@@ -2640,13 +2865,18 @@ void on_remove_all(HWND hwnd) {
             }
         }
 
-        start_remove_operation(hwnd, libs, selected_count, BACKUP_FILES, REMOVE_CONTENT_DIR);
+        // start_remove_operation(hwnd, libs, selected_count, BACKUP_FILES, REMOVE_CONTENT_DIR);
     }
 
     free(selected);
 }
 
 void on_relocate_selected(HWND hwnd) {
+    if (io_state_is_busy()) {
+        MessageBoxW(hwnd, L"Please wait for current operation to complete.", L"Busy", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+
     relocate_lib_dialog_data data = {.library = &LIBRARIES[SELECTED_INDEX]};
     const INT_PTR result          = DialogBoxParam(GetModuleHandle(NULL),
                                           MAKEINTRESOURCE(IDD_RELOCATE_LIBRARYBOX),
@@ -2659,7 +2889,7 @@ void on_relocate_selected(HWND hwnd) {
         _INFO("Old Path: %s", data.library->content_dir);
         _INFO("New Path: %s", data.new_path);
 
-        start_relocate_operation(hwnd, &LIBRARIES[SELECTED_INDEX], data.new_path);
+        // start_relocate_operation(hwnd, &LIBRARIES[SELECTED_INDEX], data.new_path);
     }
 }
 
@@ -2711,6 +2941,11 @@ void on_view_log(HWND hwnd) {
 }
 
 void on_reload_libraries(HWND hwnd) {
+    if (io_state_is_busy()) {
+        MessageBoxW(hwnd, L"Please wait for current operation to complete.", L"Busy", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+
     const int response =
       MessageBox(hwnd, "Clear found libraries and search again?", "Confirm Reload", MB_YESNO | MB_ICONQUESTION);
     if (response == IDYES) {
@@ -2923,10 +3158,23 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM lparam) {
 
         case WM_CLOSE: {
             if (io_state_is_busy()) {
-                io_state_request_cancel();
+                const int result = MessageBoxW(hwnd,
+                                               L"An operation is in progress. Cancel and exit?",
+                                               L"Confirm Exit",
+                                               MB_YESNO | MB_ICONWARNING);
 
-                if (IO_STATE.thread_handle) {
-                    WaitForSingleObject(IO_STATE.thread_handle, 2000);
+                if (result == IDYES) {
+                    io_state_request_cancel();
+
+                    EnterCriticalSection(&IO_STATE.cs);
+                    const HANDLE thread = IO_STATE.thread_handle;
+                    LeaveCriticalSection(&IO_STATE.cs);
+
+                    if (thread) {
+                        WaitForSingleObject(thread, 2000);  // 2 second timeout
+                    }
+                } else {
+                    return 0;
                 }
             }
 

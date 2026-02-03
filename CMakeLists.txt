@@ -49,5 +49,4 @@ target_link_libraries(K8-LRT PRIVATE
         shlwapi
         comctl32
         winhttp
-        pathcch
 )
