@@ -1,6 +1,6 @@
 // clang-format off
 /*
-    K8-LRT - v3.0.0 - Library removal tool for Bobdule's Kontakt 8
+    K8Tool - v3.0.0 - Library removal tool for Bobdule's Kontakt 8
 
     LICENSE
 
@@ -34,7 +34,7 @@
     REMOVAL PROCESS
 
         This process of steps is executed by the program to remove libraries. In theory, you could do all
-        of this manually. K8-LRT just makes it a lot easier.
+        of this manually. K8Tool just makes it a lot easier.
 
         - Locate library entries in the registry. These are located under two locations:
             - HKEY_LOCAL_MACHINE\SOFTWARE\Native Instruments              (Primary)
@@ -73,7 +73,7 @@
         0.3.1  (2026-01-23)  memory model improvements
         0.3.0  (2026-01-23)  sweeping code changes, bug fixes, and logging
         0.2.0  (2026-01-23)  tons of bug fixes and code improvements
-        0.1.0  (2026-01-22)  initial release of K8-LRT
+        0.1.0  (2026-01-22)  initial release of K8Tool (formerly K8Tool)
 */
 // clang-format on
 
@@ -104,7 +104,7 @@
 
 namespace K8 {
 #pragma region Logging
-    static constexpr std::string_view kLogFilename = "K8-LRT.log";
+    static constexpr std::string_view kLogFilename = "K8Tool.log";
 
     enum class LogLevel {
         Info,
@@ -122,16 +122,16 @@ namespace K8 {
         Logger() {
             const errno_t result = fopen_s(&_file, kLogFilename.data(), "a+");
             if (result == 0) {
-                Log(LogLevel::Info, "--- K8-LRT Started ---");
+                Log(LogLevel::Info, "--- K8Tool Started ---");
             } else {
-                MessageBox(NULL, "Failed to initialize logger.", "K8-LRT", MB_OK | MB_ICONERROR);
+                MessageBox(nullptr, "Failed to initialize logger.", "K8Tool", MB_OK | MB_ICONERROR);
                 std::quick_exit(-1);
             }
         }
 
         ~Logger() {
             if (_file) {
-                Log(LogLevel::Info, "--- K8-LRT Stopped ---");
+                Log(LogLevel::Info, "--- K8Tool Stopped ---");
                 fclose(_file);
             }
         }
@@ -191,8 +191,8 @@ namespace K8 {
 
             if (level == LogLevel::Fatal) {
                 char msgbox_msg[2048] = {0};
-                snprintf(msgbox_msg, 2048, "A fatal error has occurred and K8-LRT must shutdown:\n\n%s", body);
-                MessageBoxA(NULL, msgbox_msg, "Fatal Error", MB_OK | MB_ICONERROR);
+                snprintf(msgbox_msg, 2048, "A fatal error has occurred and K8Tool must shutdown:\n\n%s", body);
+                MessageBoxA(nullptr, msgbox_msg, "Fatal Error", MB_OK | MB_ICONERROR);
             }
 
 #ifndef NDEBUG
@@ -242,7 +242,7 @@ namespace K8 {
                 return true;
             }
 
-            _ERROR("Failed to enable registry backup privileges. Make sure you're running K8-LRT as Admin.");
+            _ERROR("Failed to enable registry backup privileges. Make sure you're running K8Tool as Admin.");
             return false;
         }
 
@@ -369,7 +369,7 @@ namespace K8 {
         LibraryManager() = default;
 
         void Query(HWND listView) {
-            Reset();
+            Reset(listView);
 
             HKEY keyPrimary;
             HKEY keySecondary;
@@ -431,15 +431,76 @@ namespace K8 {
             }
         }
 
-        void Reset() {
+        void Reset(HWND listView) {
             _libraries.clear();
-            // TODO: Empty ListView
+            if (!ListView_DeleteAllItems(listView)) {
+                _ERROR("Failed to clear ListView items.");
+            }
+        }
+
+        bool Contains(const std::string& libraryName) const {
+            return _libraries.contains(libraryName);
+        }
+
+        const std::string& GetContentDir(const std::string& libraryName) {
+            return _libraries.at(libraryName);
         }
 
         const LibraryMap& GetLibraries() const {
             return _libraries;
         }
     };
+
+#pragma endregion
+
+#pragma region Dialogs
+
+    namespace Dialog {
+        namespace DialogProc {
+            static INT_PTR CALLBACK About(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+                switch (msg) {
+                    case WM_NOTIFY: {
+                        LPNMHDR pnmh = (LPNMHDR)lParam;
+                        if (pnmh->idFrom == IDC_REPO_LINK && (pnmh->code == NM_CLICK || pnmh->code == NM_RETURN)) {
+                            PNMLINK pnmLink = (PNMLINK)lParam;
+                            ShellExecuteW(nullptr,
+                                          L"open",
+                                          L"https://github.com/jakerieger/K8-LRT",
+                                          nullptr,
+                                          nullptr,
+                                          SW_SHOWNORMAL);
+                            return (INT_PTR)TRUE;
+                        }
+                        break;
+                    }
+
+                    case WM_INITDIALOG: {
+                        auto latest_v = (char*)lParam;
+                        if (latest_v) {
+                            SetDlgItemTextA(hwnd, IDC_VER_LABEL, std::format("Version {}", latest_v).c_str());
+                            SetDlgItemTextA(hwnd, IDC_BUILD_LABEL, std::format("Build {}", VER_BUILD).c_str());
+                        }
+
+                        return (INT_PTR)TRUE;
+                    }
+
+                    case WM_COMMAND:
+                        if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL) {
+                            EndDialog(hwnd, LOWORD(wParam));
+                            return (INT_PTR)TRUE;
+                        }
+
+                        break;
+                }
+
+                return (INT_PTR)FALSE;
+            }
+        }  // namespace DialogProc
+
+        static void ShowAbout(HINSTANCE hInst, HWND hwnd, int id, const char* version) {
+            ::DialogBoxParam(hInst, MAKEINTRESOURCE(id), hwnd, DialogProc::About, (LPARAM)version);
+        }
+    }  // namespace Dialog
 
 #pragma endregion
 
@@ -474,8 +535,9 @@ namespace K8 {
         static constexpr int kIDC_RelocateButton  = 104;
 
         // Business-logic members
-        LibraryManager _libManager = {};
-        int _selectedIndex         = -1;
+        LibraryManager _libManager   = {};
+        int _selectedIndex           = -1;
+        std::string _selectedLibrary = "";
 
     public:
         explicit Application(HINSTANCE hInstance, LPCSTR title, UINT width, UINT height, int nCmdShow)
@@ -487,12 +549,12 @@ namespace K8 {
             Shutdown();
         }
 
-        LRESULT Run() const {
+        int Run() const {
             ::ShowWindow(_hwnd, _nCmdShow);
             ::UpdateWindow(_hwnd);
 
             MSG msg = {0};
-            while (::GetMessage(&msg, NULL, 0, 0)) {
+            while (::GetMessage(&msg, nullptr, 0, 0)) {
                 ::TranslateMessage(&msg);
                 ::DispatchMessage(&msg);
             }
@@ -517,7 +579,8 @@ namespace K8 {
                 return;
 
             if (!FreeConsole()) {
-                // Error releasing console
+                _ERROR("Unknown error occurred releasing console.");
+                return;
             }
 
             _console_attached = false;
@@ -550,7 +613,7 @@ namespace K8 {
             WNDCLASS wc      = {0};
             wc.lpfnWndProc   = Application::WndProc;
             wc.hInstance     = _hInstance;
-            wc.lpszClassName = "K8-LRT_AppClass";
+            wc.lpszClassName = "K8Tool_AppClass";
             wc.hCursor       = ::LoadCursor(nullptr, IDC_ARROW);
             wc.hIcon         = ::LoadIcon(_hInstance, MAKEINTRESOURCE(IDI_APPICON));
 
@@ -569,8 +632,8 @@ namespace K8 {
                                    win_y,
                                    _width,
                                    _height,
-                                   NULL,
-                                   NULL,
+                                   nullptr,
+                                   nullptr,
                                    _hInstance,
                                    this);
             if (_hwnd == nullptr) {
@@ -590,6 +653,12 @@ namespace K8 {
 #endif
             CoUninitialize();
         }
+
+        void OnRemoveAll() {}
+
+        void OnRemove() {}
+
+        void OnRelocate() {}
 
         LRESULT CALLBACK HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             assert(this);
@@ -613,6 +682,21 @@ namespace K8 {
                     if (!_font) {
                         _WARN("Failed to create default font. Falling back to system font.");
                     }
+
+                    HMENU hMenubar = CreateMenu();
+                    HMENU hMenu    = CreateMenu();
+
+                    AppendMenu(hMenu, MF_STRING, ID_MENU_VIEW_LOG, "&View Log");
+                    AppendMenu(hMenu, MF_STRING, ID_MENU_RELOAD_LIBRARIES, "&Reload Libraries");
+                    AppendMenu(hMenu, MF_STRING, ID_MENU_COLLECT_BACKUPS, "&Collect Backups and Zip");
+                    AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
+                    AppendMenu(hMenu, MF_STRING, ID_MENU_CHECK_UPDATES, "&Check for Updates");
+                    AppendMenu(hMenu, MF_STRING, ID_MENU_ABOUT, "&About");
+                    AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
+                    AppendMenu(hMenu, MF_STRING, ID_MENU_EXIT, "E&xit");
+
+                    AppendMenu(hMenubar, MF_POPUP, (UINT_PTR)hMenu, "&Menu");
+                    SetMenu(hwnd, hMenubar);
 
                     const HWND label = ::CreateWindow("STATIC",
                                                       "Select a library to remove:",
@@ -714,14 +798,51 @@ namespace K8 {
                 }
 
                 case WM_CTLCOLORSTATIC: {
-                    HDC hdc      = (HDC)wParam;
-                    HWND control = (HWND)lParam;
+                    HDC hdc = (HDC)wParam;
+                    // HWND control = (HWND)lParam;
                     SetBkMode(hdc, TRANSPARENT);
                     return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
                 }
 
-                case WM_COMMAND: {
+                case WM_NOTIFY: {
+                    LPNMHDR lpnmh = (LPNMHDR)lParam;
+                    if (lpnmh->idFrom == kIDC_ListView && lpnmh->code == LVN_ITEMCHANGED) {
+                        LPNMLISTVIEW pnmv = (LPNMLISTVIEW)lParam;
+                        if ((pnmv->uChanged & LVIF_STATE) && (pnmv->uNewState & LVIS_SELECTED)) {
+                            // Retrieve selected library name
+                            _selectedIndex   = pnmv->iItem;
+                            char buffer[256] = {'\0'};
+                            ListView_GetItemText(lpnmh->hwndFrom, _selectedIndex, 0, buffer, 256);
+                            _selectedLibrary = buffer;
+
+                            // Enable Remove/Relocate buttons
+                            ::EnableWindow(_removeButton, !_selectedLibrary.empty());
+                            ::EnableWindow(_relocateButton, !_selectedLibrary.empty());
+                        }
+                    }
+
                     break;
+                }
+
+                case WM_COMMAND: {
+                    switch (LOWORD(wParam)) {
+                        case kIDC_RemoveAllButton: {
+                            OnRemoveAll();
+                            break;
+                        }
+
+                        case kIDC_RemoveButton: {
+                            OnRemove();
+                            break;
+                        }
+
+                        case kIDC_RelocateButton: {
+                            OnRelocate();
+                            break;
+                        }
+                    }
+
+                    return 0;
                 }
 
                 case WM_CLOSE: {
@@ -767,6 +888,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     using namespace K8;
     try {
-        return Application {hInstance, "K8-LRT", 600, 400, nCmdShow}.Run();
+        return Application {hInstance, "K8Tool - v" VER_FILEVERSION_STR, 600, 420, nCmdShow}.Run();
     } catch (const std::exception& ex) { _FATAL("A fatal error occurred during startup:\n\n%s", ex.what()); }
 }

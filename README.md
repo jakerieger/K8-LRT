@@ -1,10 +1,10 @@
-# Kontakt 8 Library Removal Tool (K8-LRT)
+# Kontakt 8 Library Removal Tool (K8Tool)
 
-K8-LRT is a tool for removing libraries from the Bobdule version of Kontakt 8 (**Windows only**).
+K8Tool is a tool for removing libraries from the Bobdule version of Kontakt 8 (**Windows only**).
 
 ![](docs/screenshot.png)
 
-K8-LRT completely removes Kontakt libraries from the cache on disk. Native Instruments stores cache files in several
+K8Tool completely removes Kontakt libraries from the cache on disk. Native Instruments stores cache files in several
 different locations for some reason and this tool ensures they're all checked and removed.
 
 Locations that need to be searched and deleted:
@@ -17,10 +17,10 @@ Locations that need to be searched and deleted:
 - `C:\Users\Public\Documents\Native Instruments\Native Access\ras3\<filename>.jwt`
 - `C:\Program Files\Common Files\Native Instruments\Kontakt 8\PAResources` [?]
 
-## What It Does
+## What It Do
 
 This process of steps is executed by the program to remove libraries. In theory, you could do all
-of this manually. K8-LRT just makes it a lot easier.
+of this manually. K8Tool just makes it a lot easier.
 
 1. Locate library entries in the registry. These are located under two locations:
     - `HKEY_LOCAL_MACHINE\SOFTWARE\Native Instruments`              (**Primary**)
@@ -48,16 +48,16 @@ of this manually. K8-LRT just makes it a lot easier.
 
 ## Quickstart
 
-The latest version of K8-LRT is v2.0.0 - you
-can [download it here](https://github.com/jakerieger/K8-LRT/releases/latest).
+The latest version of K8Tool is v2.0.0 - you
+can [download it here](https://github.com/jakerieger/K8Tool/releases/latest).
 
-Check out the [Quickstart](docs/QUICKSTART.md) guide for info on how to use K8-LRT.
+Check out the [Quickstart](docs/QUICKSTART.md) guide for info on how to use K8Tool.
 
 ## Changelog
 
 ### 2.0.0 (January 31, 2026)
 
-The 2.0 release of K8-LRT brings a lot of bug fixes and reworks a large portion of the code base to improve both
+The 2.0 release of K8Tool brings a lot of bug fixes and reworks a large portion of the code base to improve both
 reliability and maintainability.
 
 #### Added
@@ -93,7 +93,7 @@ reliability and maintainability.
 
 ### 1.0.0 (January 25, 2026)
 
-The official 1.0 release of K8-LRT.
+The official 1.0 release of K8Tool.
 
 #### Added
 
@@ -133,15 +133,15 @@ The official 1.0 release of K8-LRT.
 
 ### 0.1.0 (January 22, 2026)
 
-- Initial release of K8-LRT
+- Initial release of K8Tool
 
 ## Building
 
-K8-LRT is written in pure C using the Windows API. The entire program is just under 2000 lines of code and the
+K8Tool is written in pure C using the Windows API. The entire program is just under 2000 lines of code and the
 executable is only about 300 Kb.
 
-K8-LRT can be compiled via `nmake`, which is included with the MSVC toolchain. This requires the C++ Visual Studio
-toolsuite to be installed. If it is, you can simply run the build script from PowerShell to build K8-LRT:
+K8Tool can be compiled via `nmake`, which is included with the MSVC toolchain. This requires the C++ Visual Studio
+toolsuite to be installed. If it is, you can simply run the build script from PowerShell to build K8Tool:
 
 ```powershell
 .\build.ps1 -Config debug # or release
@@ -149,4 +149,4 @@ toolsuite to be installed. If it is, you can simply run the build script from Po
 
 ## License
 
-K8-LRT is licensed under the [Unlicense](LICENSE).
+K8Tool is licensed under the [Unlicense](LICENSE).

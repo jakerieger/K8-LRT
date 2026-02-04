@@ -16,14 +16,14 @@ IDI_APPICON ICON "icon.ico"
 
 IDD_ABOUTBOX DIALOGEX 0, 0, 180, 110
 STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
-CAPTION "About K8-LRT"
+CAPTION "About K8Tool"
 FONT 9, "Segoe UI"
 BEGIN
     ICON            IDI_APPICON, IDC_STATIC, 82, 15, 21, 20
     LTEXT           VER_PRODUCTNAME_STR, IDC_STATIC, 0, 45, 180, 10, SS_CENTER
     LTEXT           "Version", IDC_VER_LABEL, 0, 56, 180, 10, SS_CENTER
     LTEXT           "Build", IDC_BUILD_LABEL, 0, 67, 180, 10, SS_CENTER
-    CONTROL         "<a>https://github.com/jakerieger/K8-LRT</a>", IDC_REPO_LINK, "SysLink", WS_TABSTOP, 35, 88, 130, 10
+    CONTROL         "<a>https://github.com/jakerieger/K8Tool</a>", IDC_REPO_LINK, "SysLink", WS_TABSTOP, 35, 88, 130, 10
 END
 
 IDD_REMOVE_LIBRARYBOX DIALOGEX 0, 0, 320, 200
@@ -122,7 +122,7 @@ BEGIN
             VALUE "FileVersion",      VER_FILEVERSION_STR
             VALUE "InternalName",     VER_INTERNALNAME_STR
             VALUE "LegalCopyright",   VER_LEGALCOPYRIGHT_STR
-            VALUE "OriginalFilename", "K8-LRT.exe\0"
+            VALUE "OriginalFilename", "K8Tool.exe\0"
             VALUE "ProductName",      VER_PRODUCTNAME_STR
             VALUE "ProductVersion",   VER_PRODUCTVERSION_STR
         END

@@ -13,10 +13,10 @@
 
 #define VER_COMPANYNAME_STR         "Jake Rieger\0"
 #define VER_FILEDESCRIPTION_STR     "Kontakt 8 Library Removal Tool\0"
-#define VER_INTERNALNAME_STR        "K8-LRT\0"
+#define VER_INTERNALNAME_STR        "K8Tool\0"
 #define VER_LEGALCOPYRIGHT_STR      "Copyright (C) 2026 Jake Rieger\0"
-#define VER_PRODUCTNAME_STR         "K8-LRT\0"
+#define VER_PRODUCTNAME_STR         "K8Tool\0"
 
-#define VER_REPO_STR "https://github.com/jakerieger/K8-LRT\0"
+#define VER_REPO_STR "https://github.com/jakerieger/K8Tool\0"
 
 #endif // VERSION_H
