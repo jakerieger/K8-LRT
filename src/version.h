@@ -4,10 +4,10 @@
 #define VER_MAJOR               2
 #define VER_MINOR               0
 #define VER_PATCH               0
-#define VER_BUILD               17
+#define VER_BUILD               29
 
 #define VER_FILEVERSION         VER_MAJOR,VER_MINOR,VER_PATCH,VER_BUILD
-#define VER_FILEVERSION_STR     "2.0.0.17\0"
+#define VER_FILEVERSION_STR     "2.0.0.29\0"
 #define VER_PRODUCTVERSION      VER_MAJOR,VER_MINOR,VER_PATCH,VER_BUILD
 #define VER_PRODUCTVERSION_STR  "2.0.0\0"
 

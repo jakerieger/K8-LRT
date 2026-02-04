@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.14)
-project(K8-LRT LANGUAGES C RC)
+project(K8-LRT LANGUAGES C CXX RC)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(SRC_DIR ${CMAKE_SOURCE_DIR}/src)
@@ -26,7 +29,7 @@ configure_file(
 
 add_executable(K8-LRT WIN32
         ${RES_DIR}/app.rc
-        ${SRC_DIR}/main.c
+        ${SRC_DIR}/main.cpp
 )
 
 target_include_directories(K8-LRT PRIVATE
@@ -45,23 +48,13 @@ set_target_properties(K8-LRT PROPERTIES
         MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
 )
 
-include(FetchContent)
-FetchContent_Declare(
-        expat
-        GIT_REPOSITORY https://github.com/libexpat/libexpat/
-        GIT_TAG R_2_7_4
-        SOURCE_SUBDIR expat/
-)
-FetchContent_MakeAvailable(expat)
-
 target_link_libraries(K8-LRT PRIVATE
         user32
-        gdi32
-        advapi32
+        gdi32 advapi32
         shell32
         ole32
         shlwapi
         comctl32
         winhttp
-        expat
+        dwmapi
 )
