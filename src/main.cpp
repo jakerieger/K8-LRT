@@ -535,6 +535,7 @@ namespace K8 {
 #pragma endregion
 
 #pragma region Libraries
+    using Library = std::pair<std::string, std::string>;
 
     class LibraryManager {
         // Name : ContentDir
@@ -678,6 +679,10 @@ namespace K8 {
         const LibraryMap& GetLibraries() const {
             return _libraries;
         }
+
+        Library GetLibrary(const std::string& libraryName) {
+            return std::make_pair(libraryName, _libraries.at(libraryName));
+        }
     };
 
 #pragma endregion
@@ -685,6 +690,12 @@ namespace K8 {
 #pragma region Dialogs
 
     namespace Dialog {
+        struct RemoveSelectedDialogData {
+            Library library;
+            bool backupCacheFiles;
+            bool removeContentDir;
+        };
+
         namespace DialogProc {
             static INT_PTR CALLBACK About(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 switch (msg) {
@@ -774,17 +785,121 @@ namespace K8 {
 
             static INT_PTR CALLBACK Remove(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {}
 
-            static INT_PTR CALLBACK RemoveSelected(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {}
+            static INT_PTR CALLBACK RemoveSelected(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+                static RemoveSelectedDialogData* data = nullptr;
+
+                switch (msg) {
+                    case WM_INITDIALOG: {
+                        data = (RemoveSelectedDialogData*)lParam;
+
+                        const auto hNameLabel = ::GetDlgItem(hwnd, IDC_REMOVE_SELECTED_NAME);
+                        ::SetWindowText(hNameLabel, data->library.first.c_str());
+
+                        HFONT hFont = CreateFont(16,
+                                                 0,
+                                                 0,
+                                                 0,
+                                                 FW_BOLD,
+                                                 FALSE,
+                                                 FALSE,
+                                                 FALSE,
+                                                 DEFAULT_CHARSET,
+                                                 OUT_DEFAULT_PRECIS,
+                                                 CLIP_DEFAULT_PRECIS,
+                                                 DEFAULT_QUALITY,
+                                                 DEFAULT_PITCH | FF_DONTCARE,
+                                                 "Segoe UI");
+                        ::SendMessage(hNameLabel, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+                        const HWND hContentDirLabel = ::GetDlgItem(hwnd, IDC_REMOVE_SELECTED_CONTENT_DIR);
+                        ::SetWindowText(hContentDirLabel, data->library.second.c_str());
+
+                        ::CheckDlgButton(hwnd,
+                                         IDC_REMOVE_SELECTED_BACKUP_CHECK,
+                                         data->backupCacheFiles ? BST_CHECKED : BST_UNCHECKED);
+                        ::CheckDlgButton(hwnd,
+                                         IDC_REMOVE_SELECTED_CONTENT_DIR_CHECK,
+                                         data->removeContentDir ? BST_CHECKED : BST_UNCHECKED);
+
+                        RECT parentRect, dlgRect;
+                        const HWND hParent = ::GetParent(hwnd);
+                        ::GetWindowRect(hParent, &parentRect);
+                        ::GetWindowRect(hwnd, &dlgRect);
+
+                        const int dlgW    = dlgRect.right - dlgRect.left;
+                        const int dlgH    = dlgRect.bottom - dlgRect.top;
+                        const int parentX = parentRect.left;
+                        const int parentY = parentRect.top;
+                        const int parentW = parentRect.right - parentRect.left;
+                        const int parentH = parentRect.bottom - parentRect.top;
+
+                        const int x = parentX + (parentW - dlgW) / 2;
+                        const int y = parentY + (parentH - dlgH) / 2;
+
+                        ::SetWindowPos(hwnd, NULL, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+
+                        const auto hWarningLabel = ::GetDlgItem(hwnd, IDC_REMOVE_SELECTED_WARNING_TEXT);
+                        ::SendMessage(hWarningLabel, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+                        return (INT_PTR)TRUE;
+                    }
+
+                    case WM_COMMAND: {
+                        switch (LOWORD(wParam)) {
+                            case ID_REMOVE_SELECTED_REMOVE: {
+                                data->backupCacheFiles =
+                                  (::IsDlgButtonChecked(hwnd, IDC_REMOVE_SELECTED_BACKUP_CHECK) == BST_CHECKED);
+                                data->removeContentDir =
+                                  (::IsDlgButtonChecked(hwnd, IDC_REMOVE_SELECTED_CONTENT_DIR_CHECK) == BST_CHECKED);
+
+                                ::EndDialog(hwnd, ID_REMOVE_SELECTED_REMOVE);
+                                return (INT_PTR)TRUE;
+                            }
+
+                            case ID_REMOVE_SELECTED_CANCEL:
+                            case IDCANCEL: {
+                                ::EndDialog(hwnd, IDCANCEL);
+                                return (INT_PTR)TRUE;
+                            }
+                        }
+                        break;
+                    }
+
+                    case WM_CLOSE: {
+                        ::EndDialog(hwnd, IDCANCEL);
+                        return (INT_PTR)TRUE;
+                    }
+                }
+
+                return (INT_PTR)FALSE;
+            }
 
             static INT_PTR CALLBACK RelocateSelected(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {}
         }  // namespace DialogProc
 
         static void ShowAbout(HINSTANCE hInst, HWND hwnd, const char* version) {
-            ::DialogBoxParam(hInst, MAKEINTRESOURCE(IDD_ABOUTBOX), hwnd, DialogProc::About, (LPARAM)version);
+            ::DialogBoxParam(hInst, MAKEINTRESOURCE(IDD_ABOUT_BOX), hwnd, DialogProc::About, (LPARAM)version);
         }
 
         static void ShowLogViewer(HINSTANCE hInst, HWND hwnd) {
-            ::DialogBoxParam(hInst, MAKEINTRESOURCE(IDD_LOGVIEWBOX), hwnd, DialogProc::LogViewer, (LPARAM) nullptr);
+            ::DialogBoxParam(hInst, MAKEINTRESOURCE(IDD_LOGVIEW_BOX), hwnd, DialogProc::LogViewer, (LPARAM) nullptr);
+        }
+
+        static INT_PTR ShowRemove(HINSTANCE hInst, HWND hwnd) {
+            return (INT_PTR)FALSE;
+        }
+
+        static INT_PTR ShowRemoveSelected(HINSTANCE hInst, HWND hwnd, const RemoveSelectedDialogData* data) {
+            const auto result = ::DialogBoxParam(hInst,
+                                                 MAKEINTRESOURCE(IDD_REMOVE_SELECTED_BOX),
+                                                 hwnd,
+                                                 DialogProc::RemoveSelected,
+                                                 (LPARAM)data);
+            return result;
+        }
+
+        static INT_PTR ShowRelocateSelected(HINSTANCE hInst, HWND hwnd) {
+            return (INT_PTR)FALSE;
         }
     }  // namespace Dialog
 
@@ -1065,11 +1180,34 @@ namespace K8 {
             _libManager.Scan(_listView);
         }
 
-        void OnRemoveAll() {}
+        void OnRemove() {
+            const auto result = Dialog::ShowRemove(_hInstance, _hwnd);
+            // if (result == ID_REMOVE_REMOVE) {}
+        }
 
-        void OnRemove() {}
+        void OnRemoveSelected() {
+            if (_selectedLibrary.empty())
+                return;
 
-        void OnRelocate() {}
+            Dialog::RemoveSelectedDialogData data;
+            data.library          = _libManager.GetLibrary(_selectedLibrary);
+            data.backupCacheFiles = false;
+            data.removeContentDir = true;
+
+            const auto result = Dialog::ShowRemoveSelected(_hInstance, _hwnd, &data);
+            if (result == ID_REMOVE_SELECTED_REMOVE) {
+                printf("Removing library:\n  - %s\n  - %s\n  - Backup: %s\n  - Remove Content: %s\n\n",
+                       _selectedLibrary.c_str(),
+                       data.library.second.c_str(),
+                       data.backupCacheFiles ? "True" : "False",
+                       data.removeContentDir ? "True" : "False");
+            }
+        }
+
+        void OnRelocateSelected() {
+            const auto result = Dialog::ShowRelocateSelected(_hInstance, _hwnd);
+            // if (result == ID_RELOCATE_SELECTED_RELOCATE) {}
+        }
 
         void OnRescanLibraries() {
             const auto response =
@@ -1173,17 +1311,17 @@ namespace K8 {
                     const auto command = LOWORD(wParam);
                     switch (command) {
                         case kIDC_RemoveButton: {
-                            OnRemoveAll();
-                            break;
-                        }
-
-                        case kIDC_RemoveSelectedButton: {
                             OnRemove();
                             break;
                         }
 
+                        case kIDC_RemoveSelectedButton: {
+                            OnRemoveSelected();
+                            break;
+                        }
+
                         case kIDC_RelocateSelectedButton: {
-                            OnRelocate();
+                            OnRelocateSelected();
                             break;
                         }
 
