@@ -14,7 +14,7 @@
 
 IDI_APPICON ICON "icon.ico"
 
-IDD_ABOUTBOX DIALOGEX 0, 0, 180, 110
+IDD_ABOUTBOX DIALOGEX 0, 0, 180, 130
 STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "About K8Tool"
 FONT 9, "Segoe UI"
@@ -23,7 +23,9 @@ BEGIN
     LTEXT           VER_PRODUCTNAME_STR, IDC_STATIC, 0, 45, 180, 10, SS_CENTER
     LTEXT           "Version", IDC_VER_LABEL, 0, 56, 180, 10, SS_CENTER
     LTEXT           "Build", IDC_BUILD_LABEL, 0, 67, 180, 10, SS_CENTER
-    CONTROL         "<a>https://github.com/jakerieger/K8Tool</a>", IDC_REPO_LINK, "SysLink", WS_TABSTOP, 35, 88, 130, 10
+    PUSHBUTTON      "Check for Updates", IDC_CHECK_UPDATES_BUTTON, 50, 84, 80, 14
+
+    CONTROL         "<a>https://github.com/jakerieger/K8Tool</a>", IDC_REPO_LINK, "SysLink", WS_TABSTOP, 35, 104, 130, 10
 END
 
 IDD_LOGVIEWBOX DIALOGEX 0, 0, 600, 300

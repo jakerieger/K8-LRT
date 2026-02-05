@@ -89,16 +89,22 @@
     #define DWMWA_USE_IMMERSIVE_DARK_MODE 20
 #endif
 
+// STL
 #include <algorithm>
-#include <windows.h>
-#include <winreg.h>
-#include <commctrl.h>
+#include <array>
+#include <cassert>
 #include <exception>
 #include <format>
-#include <cassert>
-#include <unordered_map>
 #include <ranges>
-#include <array>
+#include <unordered_map>
+#include <sstream>
+#include <memory>
+
+// Windows API
+#include <commctrl.h>
+#include <windows.h>
+#include <winhttp.h>
+#include <winreg.h>
 
 #define _UNUSED(x) (void)(x)
 
@@ -261,6 +267,165 @@ namespace K8 {
 
 #pragma endregion
 
+#pragma region UpdateChecking
+
+    class UpdateError : public std::runtime_error {
+    public:
+        using std::runtime_error::runtime_error;
+    };
+
+    class Update {
+        static constexpr auto kAgent       = L"K8Tool/1.0";
+        static constexpr auto kApiEndpoint = L"api.github.com";
+        static constexpr auto kRepoStub    = L"/repos/jakerieger/K8-LRT/releases/latest";
+
+    public:
+        static constexpr auto kLatestReleaseUrl = "https://github.com/jakerieger/K8-LRT/releases/latest";
+
+        enum class CheckResult {
+            CurrentVersion,
+            OldVersion,
+            FutureVersion,
+        };
+
+        static CheckResult CheckForUpdates(std::string& current) {
+            const auto currentVersion = GetLatestVersion();
+            if (currentVersion.empty())
+                throw UpdateError("Current version string is empty");
+
+            current            = currentVersion;
+            const auto compare = CompareVersions(currentVersion, VER_PRODUCTVERSION_STR);
+
+            if (compare > 0) {
+                return CheckResult::OldVersion;
+            } else if (compare < 0) {
+                return CheckResult::FutureVersion;
+            } else {
+                return CheckResult::CurrentVersion;
+            }
+        }
+
+    private:
+        static std::string ExtractTagName(const std::string& json) {
+            constexpr std::string_view key = "\"tag_name\"";
+            size_t pos                     = json.find(key);
+            if (pos == std::string_view::npos)
+                return "";
+
+            pos = json.find(':', pos + key.length());
+            if (pos == std::string_view::npos)
+                return "";
+
+            size_t start = json.find('"', pos);
+            if (start == std::string_view::npos)
+                return "";
+            start++;
+
+            const size_t end = json.find('"', start);
+            if (end == std::string_view::npos)
+                return "";
+
+            return std::string(json.substr(start, end - start));
+        }
+
+        static int CompareVersions(const std::string& v1, const std::string& v2) {
+            auto parse = [](std::string_view v) {
+                if (!v.empty() && v[0] == 'v')
+                    v.remove_prefix(1);
+
+                int mj = 0, mn = 0, p = 0;
+                char dot;
+
+                std::stringstream ss((std::string(v)));
+                ss >> mj >> dot >> mn >> dot >> p;
+
+                return std::vector<int> {mj, mn, p};
+            };
+
+            const std::vector<int> ver1 = parse(v1);
+            const std::vector<int> ver2 = parse(v2);
+
+            if (ver1 != ver2) {
+                for (size_t i = 0; i < 3; ++i) {
+                    if (ver1[i] != ver2[i])
+                        return ver1[i] - ver2[i];
+                }
+            }
+
+            return 0;
+        }
+
+        struct WinHttpHandleDeleter {
+            void operator()(HINTERNET h) const {
+                if (h)
+                    ::WinHttpCloseHandle(h);
+            }
+        };
+
+        using SafeHandle = std::unique_ptr<void, WinHttpHandleDeleter>;
+
+        static std::string GetLatestVersion() {
+            const SafeHandle hSession(::WinHttpOpen(kAgent,
+                                                    WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                                    WINHTTP_NO_PROXY_NAME,
+                                                    WINHTTP_NO_PROXY_BYPASS,
+                                                    0));
+            if (!hSession)
+                return "";
+
+            const SafeHandle hConn(::WinHttpConnect(hSession.get(), kApiEndpoint, INTERNET_DEFAULT_HTTPS_PORT, 0));
+            if (!hConn)
+                return "";
+
+            const SafeHandle hReq(::WinHttpOpenRequest(hConn.get(),
+                                                       L"GET",
+                                                       kRepoStub,
+                                                       NULL,
+                                                       WINHTTP_NO_REFERER,
+                                                       WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                                       WINHTTP_FLAG_SECURE));
+            if (!hReq)
+                return "";
+
+            const auto headers = L"User-Agent: K8-LRT/1.0\r\n";
+            ::WinHttpAddRequestHeaders(hReq.get(), headers, -1L, WINHTTP_ADDREQ_FLAG_ADD);
+
+            if (!::WinHttpSendRequest(hReq.get(), WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+                !::WinHttpReceiveResponse(hReq.get(), NULL)) {
+                return "";
+            }
+
+            DWORD statusCode     = 0;
+            DWORD statusCodeSize = sizeof(statusCode);
+            ::WinHttpQueryHeaders(hReq.get(),
+                                  WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                                  NULL,
+                                  &statusCode,
+                                  &statusCodeSize,
+                                  NULL);
+
+            if (statusCode != 200)
+                return "";
+
+            std::string respData;
+            DWORD bytesAvail = 0;
+            while (::WinHttpQueryDataAvailable(hReq.get(), &bytesAvail) && bytesAvail > 0) {
+                std::vector<char> buffer(bytesAvail);
+                DWORD bytes_read = 0;
+
+                if (::WinHttpReadData(hReq.get(), buffer.data(), bytesAvail, &bytes_read)) {
+                    respData.append(buffer.data(), bytes_read);
+                } else {
+                    break;
+                }
+            }
+
+            return ExtractTagName(respData);
+        }
+    };
+
+#pragma endregion
+
 #pragma region Registry
 
     class Registry {
@@ -413,7 +578,7 @@ namespace K8 {
     public:
         LibraryManager() = default;
 
-        void Query(HWND listView) {
+        void Scan(HWND listView, bool showDlg = false) {
             Reset(listView);
 
             HKEY keyPrimary;
@@ -473,6 +638,14 @@ namespace K8 {
 
                 int index = ListView_InsertItem(listView, &lvi);
                 ListView_SetItemText(listView, index, 1, (char*)library.second.c_str());
+            }
+
+            if (showDlg) {
+                ::MessageBox(
+                  nullptr,
+                  std::format("Scan completed successfully.\n\nLibraries found: {}", _libraries.size()).c_str(),
+                  "K8Tool",
+                  MB_OK | MB_ICONINFORMATION);
             }
         }
 
@@ -535,6 +708,59 @@ namespace K8 {
                             return (INT_PTR)TRUE;
                         }
 
+                        if (LOWORD(wParam) == IDC_CHECK_UPDATES_BUTTON) {
+                            std::string current;
+                            const auto checkResult = Update::CheckForUpdates(current);
+                            switch (checkResult) {
+                                case Update::CheckResult::CurrentVersion: {
+                                    ::MessageBox(hwnd,
+                                                 "You're running the latest version!",
+                                                 "Update",
+                                                 MB_OK | MB_ICONINFORMATION);
+                                    break;
+                                }
+
+                                case Update::CheckResult::FutureVersion: {
+                                    const auto message =
+                                      std::format("You are running a development build. K8Tool may not be stable.\n\n"
+                                                  "Current: {}\n"
+                                                  "Yours: {}\n\n"
+                                                  "While this version may work, we recommend downloading the latest "
+                                                  "stable release of K8Tool.",
+                                                  &current[0] + 1,
+                                                  VER_PRODUCTVERSION_STR);
+
+                                    ::MessageBox(hwnd, message.c_str(), "Update", MB_OK | MB_ICONWARNING);
+                                    break;
+                                }
+
+                                case Update::CheckResult::OldVersion: {
+                                    const auto message = std::format("A new version of K8-LRT is available!\n\n"
+                                                                     "Current: {}\n"
+                                                                     "Latest: {}\n\n"
+                                                                     "Visit the GitHub releases page to download?",
+                                                                     VER_PRODUCTVERSION_STR,
+                                                                     &current[0] + 1);
+
+                                    const int result = ::MessageBox(hwnd,
+                                                                    message.c_str(),
+                                                                    "Update Available",
+                                                                    MB_YESNO | MB_ICONINFORMATION);
+
+                                    if (result == IDYES) {
+                                        ::ShellExecute(NULL,
+                                                       "open",
+                                                       Update::kLatestReleaseUrl,
+                                                       NULL,
+                                                       NULL,
+                                                       SW_SHOWNORMAL);
+                                    }
+
+                                    break;
+                                }
+                            }
+                        }
+
                         break;
                 }
 
@@ -583,6 +809,12 @@ namespace K8 {
 
                 return (INT_PTR)FALSE;
             }
+
+            static INT_PTR CALLBACK Remove(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {}
+
+            static INT_PTR CALLBACK RemoveSelected(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {}
+
+            static INT_PTR CALLBACK RelocateSelected(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {}
         }  // namespace DialogProc
 
         static void ShowAbout(HINSTANCE hInst, HWND hwnd, const char* version) {
@@ -616,15 +848,15 @@ namespace K8 {
         // UI Members
         HFONT _font;
         HWND _listView;
-        HWND _removeAllButton;
         HWND _removeButton;
-        HWND _relocateButton;
+        HWND _removeSelectedButton;
+        HWND _relocateSelectedButton;
 
         // UI Element IDs
-        static constexpr int kIDC_ListView        = 101;
-        static constexpr int kIDC_RemoveAllButton = 102;
-        static constexpr int kIDC_RemoveButton    = 103;
-        static constexpr int kIDC_RelocateButton  = 104;
+        static constexpr int kIDC_ListView               = 101;
+        static constexpr int kIDC_RemoveButton           = 102;
+        static constexpr int kIDC_RemoveSelectedButton   = 103;
+        static constexpr int kIDC_RelocateSelectedButton = 104;
 
         // Business-logic members
         LibraryManager _libManager   = {};
@@ -769,10 +1001,9 @@ namespace K8 {
             HMENU hMenu    = CreateMenu();
 
             AppendMenu(hMenu, MF_STRING, ID_MENU_VIEW_LOG, "&View Log");
-            AppendMenu(hMenu, MF_STRING, ID_MENU_RELOAD_LIBRARIES, "&Reload Libraries");
+            AppendMenu(hMenu, MF_STRING, ID_MENU_RESCAN_LIBRARIES, "&Rescan Libraries");
             AppendMenu(hMenu, MF_STRING, ID_MENU_COLLECT_BACKUPS, "&Collect Backups and Zip");
             AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
-            AppendMenu(hMenu, MF_STRING, ID_MENU_CHECK_UPDATES, "&Check for Updates");
             AppendMenu(hMenu, MF_STRING, ID_MENU_ABOUT, "&About");
             AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
             AppendMenu(hMenu, MF_STRING, ID_MENU_EXIT, "E&xit");
@@ -824,25 +1055,11 @@ namespace K8 {
 
             constexpr auto buttonWidth  = 184;
             constexpr auto buttonHeight = 30;
-            _removeAllButton            = ::CreateWindowEx(0,
-                                                "BUTTON",
-                                                "Remove All",
-                                                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                                10,
-                                                320,
-                                                buttonWidth,
-                                                buttonHeight,
-                                                hwnd,
-                                                (HMENU)kIDC_RemoveAllButton,
-                                                _hInstance,
-                                                nullptr);
-            ::SendMessage(_removeAllButton, WM_SETFONT, (WPARAM)_font, TRUE);
-
-            _removeButton = ::CreateWindowEx(0,
+            _removeButton               = ::CreateWindowEx(0,
                                              "BUTTON",
-                                             "Remove Selected",
-                                             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_DISABLED,
-                                             (_width / 2 - (buttonWidth / 2)) - 8,
+                                             "Remove...",
+                                             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                             10,
                                              320,
                                              buttonWidth,
                                              buttonHeight,
@@ -852,21 +1069,35 @@ namespace K8 {
                                              nullptr);
             ::SendMessage(_removeButton, WM_SETFONT, (WPARAM)_font, TRUE);
 
-            _relocateButton = ::CreateWindowEx(0,
-                                               "BUTTON",
-                                               "Relocate Selected",
-                                               WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_DISABLED,
-                                               _width - buttonWidth - 26,
-                                               320,
-                                               buttonWidth,
-                                               buttonHeight,
-                                               hwnd,
-                                               (HMENU)kIDC_RelocateButton,
-                                               _hInstance,
-                                               nullptr);
-            ::SendMessage(_relocateButton, WM_SETFONT, (WPARAM)_font, TRUE);
+            _removeSelectedButton = ::CreateWindowEx(0,
+                                                     "BUTTON",
+                                                     "Remove Selected",
+                                                     WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_DISABLED,
+                                                     (_width / 2 - (buttonWidth / 2)) - 8,
+                                                     320,
+                                                     buttonWidth,
+                                                     buttonHeight,
+                                                     hwnd,
+                                                     (HMENU)kIDC_RemoveSelectedButton,
+                                                     _hInstance,
+                                                     nullptr);
+            ::SendMessage(_removeSelectedButton, WM_SETFONT, (WPARAM)_font, TRUE);
 
-            _libManager.Query(_listView);
+            _relocateSelectedButton = ::CreateWindowEx(0,
+                                                       "BUTTON",
+                                                       "Relocate Selected",
+                                                       WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_DISABLED,
+                                                       _width - buttonWidth - 26,
+                                                       320,
+                                                       buttonWidth,
+                                                       buttonHeight,
+                                                       hwnd,
+                                                       (HMENU)kIDC_RelocateSelectedButton,
+                                                       _hInstance,
+                                                       nullptr);
+            ::SendMessage(_relocateSelectedButton, WM_SETFONT, (WPARAM)_font, TRUE);
+
+            _libManager.Scan(_listView);
         }
 
         void OnRemoveAll() {}
@@ -875,9 +1106,22 @@ namespace K8 {
 
         void OnRelocate() {}
 
-        LRESULT CALLBACK HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-            assert(this);
+        void OnRescanLibraries() {
+            const auto response =
+              ::MessageBox(_hwnd,
+                           "Are you sure you want to clear the current library list and scan again?",
+                           "K8Tool",
+                           MB_YESNO | MB_ICONQUESTION);
+            if (response == IDYES) {
+                _libManager.Scan(_listView, true);
+            }
+        }
 
+        void OnExit() {
+            ::PostQuitMessage(0);
+        }
+
+        LRESULT CALLBACK HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             switch (msg) {
                 case WM_CREATE: {
                     OnCreate(hwnd);
@@ -911,8 +1155,8 @@ namespace K8 {
                             _selectedLibrary = buffer;
 
                             // Enable Remove/Relocate buttons
-                            ::EnableWindow(_removeButton, !_selectedLibrary.empty());
-                            ::EnableWindow(_relocateButton, !_selectedLibrary.empty());
+                            ::EnableWindow(_removeSelectedButton, !_selectedLibrary.empty());
+                            ::EnableWindow(_relocateSelectedButton, !_selectedLibrary.empty());
                         }
                     }
 
@@ -920,19 +1164,25 @@ namespace K8 {
                 }
 
                 case WM_COMMAND: {
-                    switch (LOWORD(wParam)) {
-                        case kIDC_RemoveAllButton: {
+                    const auto command = LOWORD(wParam);
+                    switch (command) {
+                        case kIDC_RemoveButton: {
                             OnRemoveAll();
                             break;
                         }
 
-                        case kIDC_RemoveButton: {
+                        case kIDC_RemoveSelectedButton: {
                             OnRemove();
                             break;
                         }
 
-                        case kIDC_RelocateButton: {
+                        case kIDC_RelocateSelectedButton: {
                             OnRelocate();
+                            break;
+                        }
+
+                        case ID_MENU_RESCAN_LIBRARIES: {
+                            OnRescanLibraries();
                             break;
                         }
 
@@ -947,7 +1197,7 @@ namespace K8 {
                         }
 
                         case ID_MENU_EXIT: {
-                            ::PostQuitMessage(0);
+                            OnExit();
                             break;
                         }
                     }
