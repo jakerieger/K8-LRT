@@ -201,6 +201,32 @@ namespace K8 {
             }
 #endif
         }
+
+        bool Valid() const {
+            return (_file != nullptr);
+        }
+
+        std::string GetLogContents() const {
+            if (!Valid())
+                return "";
+
+            const auto current = ftell(_file);
+
+            fseek(_file, 0, SEEK_END);
+            const auto size = ftell(_file);
+            fseek(_file, 0, SEEK_SET);
+
+            if (size <= 0)
+                return "";
+
+            std::string contents;
+            contents.resize(size);
+            fread(contents.data(), 1, size, _file);
+
+            fseek(_file, current, SEEK_SET);
+
+            return contents;
+        }
     };
 
     static Logger g_Logger;
@@ -214,6 +240,25 @@ namespace K8 {
         std::quick_exit(-1);                                                                                           \
     } while (FALSE)
 #define _LOG(fmt, ...) g_Logger.Log(LogLevel::Debug, fmt, ##__VA_ARGS__)
+#pragma endregion
+
+#pragma region Utils
+
+    namespace Utils {
+        static std::string LF_To_CRLF(const std::string& input) {
+            std::string output;
+            output.reserve(input.size() + (input.size() / 10));
+
+            for (const auto c : input) {
+                if (c == '\n')
+                    output += '\r';
+                output += c;
+            }
+
+            return output;
+        }
+    }  // namespace Utils
+
 #pragma endregion
 
 #pragma region Registry
@@ -495,10 +540,57 @@ namespace K8 {
 
                 return (INT_PTR)FALSE;
             }
+
+            static INT_PTR CALLBACK LogViewer(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+                switch (msg) {
+                    case WM_INITDIALOG: {
+                        const auto contents = g_Logger.GetLogContents();
+                        if (contents.empty()) {
+                            ::MessageBox(hwnd,
+                                         "Failed to retrieve contents of log file.",
+                                         "Error",
+                                         MB_OK | MB_ICONERROR);
+                            return (INT_PTR)FALSE;
+                        }
+
+                        const auto logContents = Utils::LF_To_CRLF(contents);
+                        const HWND logViewer   = ::GetDlgItem(hwnd, IDC_LOGVIEW_EDIT);
+                        ::SetWindowText(logViewer, logContents.c_str());
+                        const auto textLength = ::GetWindowTextLength(logViewer);
+                        ::SendMessage(logViewer, EM_SETSEL, (WPARAM)textLength, (LPARAM)textLength);
+                        ::SendMessage(logViewer, WM_VSCROLL, SB_BOTTOM, 0);
+
+                        return (INT_PTR)FALSE;
+                    }
+
+                    case WM_SIZE: {
+                        int newWidth  = LOWORD(lParam);
+                        int newHeight = HIWORD(lParam);
+
+                        HWND hEdit = ::GetDlgItem(hwnd, IDC_LOGVIEW_EDIT);
+
+                        ::MoveWindow(hEdit, 0, 0, newWidth, newHeight, TRUE);
+                        return (INT_PTR)TRUE;
+                    }
+
+                    case WM_COMMAND:
+                        if (LOWORD(wParam) == IDCANCEL) {
+                            ::EndDialog(hwnd, LOWORD(wParam));
+                            return (INT_PTR)TRUE;
+                        }
+                        break;
+                }
+
+                return (INT_PTR)FALSE;
+            }
         }  // namespace DialogProc
 
-        static void ShowAbout(HINSTANCE hInst, HWND hwnd, int id, const char* version) {
-            ::DialogBoxParam(hInst, MAKEINTRESOURCE(id), hwnd, DialogProc::About, (LPARAM)version);
+        static void ShowAbout(HINSTANCE hInst, HWND hwnd, const char* version) {
+            ::DialogBoxParam(hInst, MAKEINTRESOURCE(IDD_ABOUTBOX), hwnd, DialogProc::About, (LPARAM)version);
+        }
+
+        static void ShowLogViewer(HINSTANCE hInst, HWND hwnd) {
+            ::DialogBoxParam(hInst, MAKEINTRESOURCE(IDD_LOGVIEWBOX), hwnd, DialogProc::LogViewer, (LPARAM) nullptr);
         }
     }  // namespace Dialog
 
@@ -654,6 +746,129 @@ namespace K8 {
             CoUninitialize();
         }
 
+        void OnCreate(HWND hwnd) {
+            _font = CreateFont(16,
+                               0,
+                               0,
+                               0,
+                               FW_NORMAL,
+                               FALSE,
+                               FALSE,
+                               FALSE,
+                               DEFAULT_CHARSET,
+                               OUT_DEFAULT_PRECIS,
+                               CLIP_DEFAULT_PRECIS,
+                               DEFAULT_QUALITY,
+                               DEFAULT_PITCH | FF_DONTCARE,
+                               "Segoe UI");
+            if (!_font) {
+                _WARN("Failed to create default font. Falling back to system font.");
+            }
+
+            HMENU hMenubar = CreateMenu();
+            HMENU hMenu    = CreateMenu();
+
+            AppendMenu(hMenu, MF_STRING, ID_MENU_VIEW_LOG, "&View Log");
+            AppendMenu(hMenu, MF_STRING, ID_MENU_RELOAD_LIBRARIES, "&Reload Libraries");
+            AppendMenu(hMenu, MF_STRING, ID_MENU_COLLECT_BACKUPS, "&Collect Backups and Zip");
+            AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
+            AppendMenu(hMenu, MF_STRING, ID_MENU_CHECK_UPDATES, "&Check for Updates");
+            AppendMenu(hMenu, MF_STRING, ID_MENU_ABOUT, "&About");
+            AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
+            AppendMenu(hMenu, MF_STRING, ID_MENU_EXIT, "E&xit");
+
+            AppendMenu(hMenubar, MF_POPUP, (UINT_PTR)hMenu, "&Menu");
+            SetMenu(hwnd, hMenubar);
+
+            const HWND label = ::CreateWindow("STATIC",
+                                              "Select a library to remove:",
+                                              WS_CHILD | WS_VISIBLE | SS_LEFT,
+                                              10,
+                                              10,
+                                              300,
+                                              16,
+                                              hwnd,
+                                              nullptr,
+                                              _hInstance,
+                                              nullptr);
+            ::SendMessage(label, WM_SETFONT, (WPARAM)_font, TRUE);
+
+            _listView = ::CreateWindowEx(WS_EX_CLIENTEDGE,
+                                         WC_LISTVIEW,
+                                         "",
+                                         WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL,
+                                         10,
+                                         34,
+                                         564,
+                                         274,
+                                         hwnd,
+                                         (HMENU)kIDC_ListView,
+                                         _hInstance,
+                                         nullptr);
+            ListView_SetExtendedListViewStyle(_listView, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_GRIDLINES);
+
+            LVCOLUMN lvc;
+            lvc.mask        = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+            char name[]     = "Name";
+            char location[] = "Location";
+            // Column 1: Name
+            lvc.iSubItem = 0;
+            lvc.pszText  = name;
+            lvc.cx       = 200;
+            ListView_InsertColumn(_listView, 0, &lvc);
+            // Column 2: ContentDir
+            lvc.iSubItem = 1;
+            lvc.pszText  = location;
+            lvc.cx       = 340;
+            ListView_InsertColumn(_listView, 1, &lvc);
+
+            constexpr auto buttonWidth  = 184;
+            constexpr auto buttonHeight = 30;
+            _removeAllButton            = ::CreateWindowEx(0,
+                                                "BUTTON",
+                                                "Remove All",
+                                                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                                10,
+                                                320,
+                                                buttonWidth,
+                                                buttonHeight,
+                                                hwnd,
+                                                (HMENU)kIDC_RemoveAllButton,
+                                                _hInstance,
+                                                nullptr);
+            ::SendMessage(_removeAllButton, WM_SETFONT, (WPARAM)_font, TRUE);
+
+            _removeButton = ::CreateWindowEx(0,
+                                             "BUTTON",
+                                             "Remove Selected",
+                                             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_DISABLED,
+                                             (_width / 2 - (buttonWidth / 2)) - 8,
+                                             320,
+                                             buttonWidth,
+                                             buttonHeight,
+                                             hwnd,
+                                             (HMENU)kIDC_RemoveButton,
+                                             _hInstance,
+                                             nullptr);
+            ::SendMessage(_removeButton, WM_SETFONT, (WPARAM)_font, TRUE);
+
+            _relocateButton = ::CreateWindowEx(0,
+                                               "BUTTON",
+                                               "Relocate Selected",
+                                               WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_DISABLED,
+                                               _width - buttonWidth - 26,
+                                               320,
+                                               buttonWidth,
+                                               buttonHeight,
+                                               hwnd,
+                                               (HMENU)kIDC_RelocateButton,
+                                               _hInstance,
+                                               nullptr);
+            ::SendMessage(_relocateButton, WM_SETFONT, (WPARAM)_font, TRUE);
+
+            _libManager.Query(_listView);
+        }
+
         void OnRemoveAll() {}
 
         void OnRemove() {}
@@ -665,127 +880,7 @@ namespace K8 {
 
             switch (msg) {
                 case WM_CREATE: {
-                    _font = CreateFont(16,
-                                       0,
-                                       0,
-                                       0,
-                                       FW_NORMAL,
-                                       FALSE,
-                                       FALSE,
-                                       FALSE,
-                                       DEFAULT_CHARSET,
-                                       OUT_DEFAULT_PRECIS,
-                                       CLIP_DEFAULT_PRECIS,
-                                       DEFAULT_QUALITY,
-                                       DEFAULT_PITCH | FF_DONTCARE,
-                                       "Segoe UI");
-                    if (!_font) {
-                        _WARN("Failed to create default font. Falling back to system font.");
-                    }
-
-                    HMENU hMenubar = CreateMenu();
-                    HMENU hMenu    = CreateMenu();
-
-                    AppendMenu(hMenu, MF_STRING, ID_MENU_VIEW_LOG, "&View Log");
-                    AppendMenu(hMenu, MF_STRING, ID_MENU_RELOAD_LIBRARIES, "&Reload Libraries");
-                    AppendMenu(hMenu, MF_STRING, ID_MENU_COLLECT_BACKUPS, "&Collect Backups and Zip");
-                    AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
-                    AppendMenu(hMenu, MF_STRING, ID_MENU_CHECK_UPDATES, "&Check for Updates");
-                    AppendMenu(hMenu, MF_STRING, ID_MENU_ABOUT, "&About");
-                    AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
-                    AppendMenu(hMenu, MF_STRING, ID_MENU_EXIT, "E&xit");
-
-                    AppendMenu(hMenubar, MF_POPUP, (UINT_PTR)hMenu, "&Menu");
-                    SetMenu(hwnd, hMenubar);
-
-                    const HWND label = ::CreateWindow("STATIC",
-                                                      "Select a library to remove:",
-                                                      WS_CHILD | WS_VISIBLE | SS_LEFT,
-                                                      10,
-                                                      10,
-                                                      300,
-                                                      16,
-                                                      hwnd,
-                                                      nullptr,
-                                                      _hInstance,
-                                                      nullptr);
-                    ::SendMessage(label, WM_SETFONT, (WPARAM)_font, TRUE);
-
-                    _listView = ::CreateWindowEx(WS_EX_CLIENTEDGE,
-                                                 WC_LISTVIEW,
-                                                 "",
-                                                 WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL,
-                                                 10,
-                                                 34,
-                                                 564,
-                                                 274,
-                                                 hwnd,
-                                                 (HMENU)kIDC_ListView,
-                                                 _hInstance,
-                                                 nullptr);
-                    ListView_SetExtendedListViewStyle(_listView,
-                                                      LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_GRIDLINES);
-
-                    LVCOLUMN lvc;
-                    lvc.mask        = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
-                    char name[]     = "Name";
-                    char location[] = "Location";
-                    // Column 1: Name
-                    lvc.iSubItem = 0;
-                    lvc.pszText  = name;
-                    lvc.cx       = 200;
-                    ListView_InsertColumn(_listView, 0, &lvc);
-                    // Column 2: ContentDir
-                    lvc.iSubItem = 1;
-                    lvc.pszText  = location;
-                    lvc.cx       = 340;
-                    ListView_InsertColumn(_listView, 1, &lvc);
-
-                    constexpr auto buttonWidth  = 184;
-                    constexpr auto buttonHeight = 30;
-                    _removeAllButton            = ::CreateWindowEx(0,
-                                                        "BUTTON",
-                                                        "Remove All",
-                                                        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                                        10,
-                                                        320,
-                                                        buttonWidth,
-                                                        buttonHeight,
-                                                        hwnd,
-                                                        (HMENU)kIDC_RemoveAllButton,
-                                                        _hInstance,
-                                                        nullptr);
-                    ::SendMessage(_removeAllButton, WM_SETFONT, (WPARAM)_font, TRUE);
-
-                    _removeButton = ::CreateWindowEx(0,
-                                                     "BUTTON",
-                                                     "Remove Selected",
-                                                     WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_DISABLED,
-                                                     (_width / 2 - (buttonWidth / 2)) - 8,
-                                                     320,
-                                                     buttonWidth,
-                                                     buttonHeight,
-                                                     hwnd,
-                                                     (HMENU)kIDC_RemoveButton,
-                                                     _hInstance,
-                                                     nullptr);
-                    ::SendMessage(_removeButton, WM_SETFONT, (WPARAM)_font, TRUE);
-
-                    _relocateButton = ::CreateWindowEx(0,
-                                                       "BUTTON",
-                                                       "Relocate Selected",
-                                                       WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_DISABLED,
-                                                       _width - buttonWidth - 26,
-                                                       320,
-                                                       buttonWidth,
-                                                       buttonHeight,
-                                                       hwnd,
-                                                       (HMENU)kIDC_RelocateButton,
-                                                       _hInstance,
-                                                       nullptr);
-                    ::SendMessage(_relocateButton, WM_SETFONT, (WPARAM)_font, TRUE);
-
-                    _libManager.Query(_listView);
+                    OnCreate(hwnd);
                     return 0;
                 }
 
@@ -838,6 +933,21 @@ namespace K8 {
 
                         case kIDC_RelocateButton: {
                             OnRelocate();
+                            break;
+                        }
+
+                        case ID_MENU_VIEW_LOG: {
+                            Dialog::ShowLogViewer(_hInstance, hwnd);
+                            break;
+                        }
+
+                        case ID_MENU_ABOUT: {
+                            Dialog::ShowAbout(_hInstance, hwnd, VER_PRODUCTVERSION_STR);
+                            break;
+                        }
+
+                        case ID_MENU_EXIT: {
+                            ::PostQuitMessage(0);
                             break;
                         }
                     }
