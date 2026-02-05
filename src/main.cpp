@@ -113,6 +113,7 @@ namespace K8 {
 #pragma region CustomEvents
 
 #define WM_UPDATE_CHECK_COMPLETED (WM_USER + 1)
+#define WM_REMOVE_SELECTED_COMPLETED (WM_USER + 2)
 
 #pragma endregion
 
@@ -905,6 +906,25 @@ namespace K8 {
 
 #pragma endregion
 
+#pragma region Threads
+
+    class Threads {
+    public:
+        struct RemoveSelectedResult {
+            bool success;
+            bool cancelled;
+        };
+
+        static void RemoveSelected(HWND hwnd, const Dialog::RemoveSelectedDialogData* data) {
+            auto* result      = new RemoveSelectedResult;
+            result->success   = true;
+            result->cancelled = false;
+            ::PostMessage(hwnd, WM_REMOVE_SELECTED_COMPLETED, 0, (LPARAM)result);
+        }
+    };
+
+#pragma endregion
+
 #pragma region Application
 
     class ApplicationError : public std::runtime_error {
@@ -1058,6 +1078,14 @@ namespace K8 {
             CoUninitialize();
         }
 
+        void RescanAndReset() {
+            _libManager.Scan(_listView, true);
+            _selectedLibrary = "";
+            _selectedIndex   = -1;
+            ::EnableWindow(_relocateSelectedButton, false);
+            ::EnableWindow(_removeSelectedButton, false);
+        }
+
         void OnCreate(HWND hwnd) {
             _font = CreateFont(16,
                                0,
@@ -1196,11 +1224,14 @@ namespace K8 {
 
             const auto result = Dialog::ShowRemoveSelected(_hInstance, _hwnd, &data);
             if (result == ID_REMOVE_SELECTED_REMOVE) {
-                printf("Removing library:\n  - %s\n  - %s\n  - Backup: %s\n  - Remove Content: %s\n\n",
-                       _selectedLibrary.c_str(),
-                       data.library.second.c_str(),
-                       data.backupCacheFiles ? "True" : "False",
-                       data.removeContentDir ? "True" : "False");
+                _INFO("Removing library:\n  - %s\n  - %s\n  - Backup: %s\n  - Remove Content: %s\n\n",
+                      _selectedLibrary.c_str(),
+                      data.library.second.c_str(),
+                      data.backupCacheFiles ? "True" : "False",
+                      data.removeContentDir ? "True" : "False");
+
+                // Spawn removal thread
+                std::thread(Threads::RemoveSelected, _hwnd, &data).detach();
             }
         }
 
@@ -1220,8 +1251,12 @@ namespace K8 {
             }
         }
 
-        void OnExit() {
-            ::PostQuitMessage(0);
+        void OnExit() const {
+            const auto response =
+              ::MessageBox(_hwnd, "Are you sure you want to exit?", "K8Tool", MB_YESNO | MB_ICONQUESTION);
+            if (response == IDYES) {
+                ::PostQuitMessage(0);
+            }
         }
 
         void OnUpdateCheckCompleted(const Update::CheckResult* result) const {
@@ -1263,6 +1298,22 @@ namespace K8 {
                     break;
                 }
             }
+            delete result;
+        }
+
+        void OnRemoveSelectedCompleted(const Threads::RemoveSelectedResult* result) {
+            if (result->success) {
+                ::MessageBox(_hwnd, "Library removed successfully.", "K8Tool", MB_OK | MB_ICONINFORMATION);
+                RescanAndReset();
+            } else {
+                if (result->cancelled) {
+                    ::MessageBox(_hwnd, "Operation was cancelled.", "K8Tool", MB_OK | MB_ICONWARNING);
+                } else {
+                    ::MessageBox(_hwnd, "Failed to remove library.", "K8Tool", MB_OK | MB_ICONERROR);
+                }
+            }
+
+            delete result;
         }
 
         LRESULT CALLBACK HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -1366,6 +1417,17 @@ namespace K8 {
                         break;
                     }
                     OnUpdateCheckCompleted(result);
+                    break;
+                }
+
+                case WM_REMOVE_SELECTED_COMPLETED: {
+                    const auto result = reinterpret_cast<Threads::RemoveSelectedResult*>(lParam);
+                    if (!result) {
+                        _ERROR("Failed to get result from update check.");
+                        break;
+                    }
+                    OnRemoveSelectedCompleted(result);
+                    break;
                 }
             }
 
