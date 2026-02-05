@@ -99,6 +99,7 @@
 #include <unordered_map>
 #include <sstream>
 #include <memory>
+#include <thread>
 
 // Windows API
 #include <commctrl.h>
@@ -109,6 +110,12 @@
 #define _UNUSED(x) (void)(x)
 
 namespace K8 {
+#pragma region CustomEvents
+
+#define WM_UPDATE_CHECK_COMPLETED (WM_USER + 1)
+
+#pragma endregion
+
 #pragma region Logging
     static constexpr std::string_view kLogFilename = "K8Tool.log";
 
@@ -281,28 +288,32 @@ namespace K8 {
 
     public:
         static constexpr auto kLatestReleaseUrl = "https://github.com/jakerieger/K8-LRT/releases/latest";
+        static constexpr auto kResultCurrent    = 0;
+        static constexpr auto kResultOld        = 1;
+        static constexpr auto kResultFuture     = 2;
 
-        enum class CheckResult {
-            CurrentVersion,
-            OldVersion,
-            FutureVersion,
+        struct CheckResult {
+            std::string currentVersion;
+            int compare;  // 0: Current  1: Old  2: Future
         };
 
-        static CheckResult CheckForUpdates(std::string& current) {
+        static void CheckForUpdates(HWND hwnd) {
             const auto currentVersion = GetLatestVersion();
             if (currentVersion.empty())
                 throw UpdateError("Current version string is empty");
 
-            current            = currentVersion;
             const auto compare = CompareVersions(currentVersion, VER_PRODUCTVERSION_STR);
 
-            if (compare > 0) {
-                return CheckResult::OldVersion;
-            } else if (compare < 0) {
-                return CheckResult::FutureVersion;
-            } else {
-                return CheckResult::CurrentVersion;
-            }
+            auto* result           = new CheckResult;
+            result->currentVersion = currentVersion;
+            if (compare > 0)
+                result->compare = kResultOld;
+            else if (compare < 0)
+                result->compare = kResultFuture;
+            else
+                result->compare = kResultCurrent;
+
+            ::PostMessage(hwnd, WM_UPDATE_CHECK_COMPLETED, 0, (LPARAM)result);
         }
 
     private:
@@ -709,56 +720,7 @@ namespace K8 {
                         }
 
                         if (LOWORD(wParam) == IDC_CHECK_UPDATES_BUTTON) {
-                            std::string current;
-                            const auto checkResult = Update::CheckForUpdates(current);
-                            switch (checkResult) {
-                                case Update::CheckResult::CurrentVersion: {
-                                    ::MessageBox(hwnd,
-                                                 "You're running the latest version!",
-                                                 "Update",
-                                                 MB_OK | MB_ICONINFORMATION);
-                                    break;
-                                }
-
-                                case Update::CheckResult::FutureVersion: {
-                                    const auto message =
-                                      std::format("You are running a development build. K8Tool may not be stable.\n\n"
-                                                  "Current: {}\n"
-                                                  "Yours: {}\n\n"
-                                                  "While this version may work, we recommend downloading the latest "
-                                                  "stable release of K8Tool.",
-                                                  &current[0] + 1,
-                                                  VER_PRODUCTVERSION_STR);
-
-                                    ::MessageBox(hwnd, message.c_str(), "Update", MB_OK | MB_ICONWARNING);
-                                    break;
-                                }
-
-                                case Update::CheckResult::OldVersion: {
-                                    const auto message = std::format("A new version of K8-LRT is available!\n\n"
-                                                                     "Current: {}\n"
-                                                                     "Latest: {}\n\n"
-                                                                     "Visit the GitHub releases page to download?",
-                                                                     VER_PRODUCTVERSION_STR,
-                                                                     &current[0] + 1);
-
-                                    const int result = ::MessageBox(hwnd,
-                                                                    message.c_str(),
-                                                                    "Update Available",
-                                                                    MB_YESNO | MB_ICONINFORMATION);
-
-                                    if (result == IDYES) {
-                                        ::ShellExecute(NULL,
-                                                       "open",
-                                                       Update::kLatestReleaseUrl,
-                                                       NULL,
-                                                       NULL,
-                                                       SW_SHOWNORMAL);
-                                    }
-
-                                    break;
-                                }
-                            }
+                            std::thread(Update::CheckForUpdates, ::GetParent(hwnd)).detach();
                         }
 
                         break;
@@ -876,6 +838,9 @@ namespace K8 {
         int Run() const {
             ::ShowWindow(_hwnd, _nCmdShow);
             ::UpdateWindow(_hwnd);
+
+            // Spawn update check thread
+            std::thread(Update::CheckForUpdates, _hwnd).detach();
 
             MSG msg = {0};
             while (::GetMessage(&msg, nullptr, 0, 0)) {
@@ -1121,6 +1086,47 @@ namespace K8 {
             ::PostQuitMessage(0);
         }
 
+        void OnUpdateCheckCompleted(const Update::CheckResult* result) const {
+            switch (result->compare) {
+                case Update::kResultCurrent: {
+                    ::MessageBox(_hwnd, "You're running the latest version!", "Update", MB_OK | MB_ICONINFORMATION);
+                    break;
+                }
+
+                case Update::kResultOld: {
+                    const auto message = std::format("A new version of K8-LRT is available!\n\n"
+                                                     "Current: {}\n"
+                                                     "Latest: {}\n\n"
+                                                     "Visit the GitHub releases page to download?",
+                                                     VER_PRODUCTVERSION_STR,
+                                                     &result->currentVersion[0] + 1);
+
+                    const int response =
+                      ::MessageBox(_hwnd, message.c_str(), "Update Available", MB_YESNO | MB_ICONINFORMATION);
+
+                    if (response == IDYES) {
+                        ::ShellExecute(NULL, "open", Update::kLatestReleaseUrl, NULL, NULL, SW_SHOWNORMAL);
+                    }
+
+                    break;
+                }
+
+                case Update::kResultFuture: {
+                    const auto message =
+                      std::format("You are running a development build. K8Tool may not be stable.\n\n"
+                                  "Current: {}\n"
+                                  "Yours: {}\n\n"
+                                  "While this version may work, we recommend downloading the latest "
+                                  "stable release of K8Tool.",
+                                  &result->currentVersion[0] + 1,
+                                  VER_PRODUCTVERSION_STR);
+
+                    ::MessageBox(_hwnd, message.c_str(), "Update", MB_OK | MB_ICONWARNING);
+                    break;
+                }
+            }
+        }
+
         LRESULT CALLBACK HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             switch (msg) {
                 case WM_CREATE: {
@@ -1213,6 +1219,15 @@ namespace K8 {
                 case WM_DESTROY: {
                     ::PostQuitMessage(0);
                     return 0;
+                }
+
+                case WM_UPDATE_CHECK_COMPLETED: {
+                    const auto result = reinterpret_cast<Update::CheckResult*>(lParam);
+                    if (!result) {
+                        _ERROR("Failed to get result from update check.");
+                        break;
+                    }
+                    OnUpdateCheckCompleted(result);
                 }
             }
 
