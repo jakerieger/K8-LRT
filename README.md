@@ -149,4 +149,4 @@ toolsuite to be installed. If it is, you can simply run the build script from Po
 
 ## License
 
-K8Tool is licensed under the [Unlicense](LICENSE).
+K8Tool is licensed under the [ISC license](LICENSE).

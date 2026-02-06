@@ -7,6 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(SRC_DIR ${CMAKE_SOURCE_DIR}/src)
 set(RES_DIR ${CMAKE_SOURCE_DIR}/res)
+set(VENDOR_DIR ${CMAKE_SOURCE_DIR}/vendor)
 
 set(VER_MAJOR 3)
 set(VER_MINOR 0)
@@ -27,12 +28,16 @@ configure_file(
         "${SRC_DIR}/version.h"
 )
 
+file(GLOB VENDOR_SRCS ${VENDOR_DIR}/*.h ${VENDOR_DIR}/*.cpp)
+
 add_executable(K8Tool WIN32
+        ${VENDOR_SRCS}
         ${RES_DIR}/app.rc
         ${SRC_DIR}/main.cpp
 )
 
 target_include_directories(K8Tool PRIVATE
+        ${VENDOR_DIR}
         ${SRC_DIR}
         ${CMAKE_SOURCE_DIR}/vendor
 )
@@ -50,7 +55,8 @@ set_target_properties(K8Tool PROPERTIES
 
 target_link_libraries(K8Tool PRIVATE
         user32
-        gdi32 advapi32
+        gdi32
+        advapi32
         shell32
         ole32
         shlwapi

@@ -1,35 +1,20 @@
-// clang-format off
 /*
     K8Tool - v3.0.0 - Library removal tool for Bobdule's Kontakt 8
 
     LICENSE
 
-        Unlicense
+        ISC License
 
-        This is free and unencumbered software released into the public domain.
+        Copyright 2026 Jake Rieger
 
-        Anyone is free to copy, modify, publish, use, compile, sell, or
-        distribute this software, either in source code form or as a compiled
-        binary, for any purpose, commercial or non-commercial, and by any
-        means.
+        Permission to use, copy, modify, and/or distribute this software for any purpose with or without fee is hereby
+        granted, provided that the above copyright notice and this permission notice appear in all copies.
 
-        In jurisdictions that recognize copyright laws, the author or authors
-        of this software dedicate any and all copyright interest in the
-        software to the public domain. We make this dedication for the benefit
-        of the public at large and to the detriment of our heirs and
-        successors. We intend this dedication to be an overt act of
-        relinquishment in perpetuity of all present and future rights to this
-        software under copyright law.
-
-        THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
-        EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-        MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
-        IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
-        OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
-        ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
-        OTHER DEALINGS IN THE SOFTWARE.
-
-        For more information, please refer to <https://unlicense.org/>
+        THE SOFTWARE IS PROVIDED “AS IS” AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING
+        ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL,
+        DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR
+        PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION
+        WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
     REMOVAL PROCESS
 
@@ -75,7 +60,6 @@
         0.2.0  (2026-01-23)  tons of bug fixes and code improvements
         0.1.0  (2026-01-22)  initial release of K8Tool (formerly K8Tool)
 */
-// clang-format on
 
 #include "version.h"
 #include "resource.h"
@@ -83,6 +67,7 @@
 #pragma warning(disable : 4312)
 
 #define _CRT_SECURE_NO_WARNINGS 1
+#define _NO_IO 1
 
 #include <dwmapi.h>
 #ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
@@ -100,16 +85,37 @@
 #include <sstream>
 #include <memory>
 #include <thread>
+#include <filesystem>
 
 // Windows API
 #include <commctrl.h>
+#include <shellapi.h>
+#include <shlobj.h>
 #include <windows.h>
 #include <winhttp.h>
 #include <winreg.h>
 
+// Vendor
+#include <tinyxml2.h>
+
 #define _UNUSED(x) (void)(x)
 
 namespace K8 {
+    namespace fs = std::filesystem;
+
+#pragma region Globals
+
+    namespace Globals {
+        static constexpr auto kServiceCenter = R"(C:\Program Files\Common Files\Native Instruments\Service Center)";
+        static constexpr auto kNativeAccessXML =
+          R"(C:\Program Files\Common Files\Native Instruments\Service Center\NativeAccess.xml)";
+        static constexpr auto kLibrariesCache = R"(Native Instruments\Kontakt 8\LibrariesCache)";
+        static constexpr auto kRAS3           = R"(C:\Users\Public\Documents\Native Instruments\Native Access\ras3)";
+        static constexpr auto kKompleteDB3    = R"(Native Instruments\Kontakt 8\komplete.db3)";
+    }  // namespace Globals
+
+#pragma endregion
+
 #pragma region CustomEvents
 
 #define WM_UPDATE_CHECK_COMPLETED (WM_USER + 1)
@@ -118,7 +124,7 @@ namespace K8 {
 #pragma endregion
 
 #pragma region Logging
-    static constexpr std::string_view kLogFilename = "K8Tool.log";
+    static constexpr std::string_view kLogFilename = "K8.log";
 
     enum class LogLevel {
         Info,
@@ -130,7 +136,7 @@ namespace K8 {
 
     class Logger {
         FILE* _file {nullptr};
-        bool _console_attached {false};
+        bool _consoleAttached {false};
 
     public:
         Logger() {
@@ -151,7 +157,7 @@ namespace K8 {
         }
 
         void SetConsoleAttached(bool attached) {
-            _console_attached = attached;
+            _consoleAttached = attached;
         }
 
         void Log(LogLevel level, const char* fmt, ...) const {
@@ -210,7 +216,7 @@ namespace K8 {
             }
 
 #ifndef NDEBUG
-            if (_console_attached) {
+            if (_consoleAttached) {
                 printf("%s", msg);
             }
 #endif
@@ -270,6 +276,52 @@ namespace K8 {
             }
 
             return output;
+        }
+
+        static std::string FindSNPID(const fs::path& xmlFile, const char* libraryName) {
+            tinyxml2::XMLDocument doc;
+
+            if (doc.LoadFile(xmlFile.string().c_str()) != tinyxml2::XML_SUCCESS) {
+                return "";
+            }
+
+            tinyxml2::XMLElement* root = doc.FirstChildElement("ProductHints");
+            if (!root)
+                return "";
+
+            for (tinyxml2::XMLElement* product = root->FirstChildElement("Product"); product != nullptr;
+                 product                       = product->NextSiblingElement("Product")) {
+                const tinyxml2::XMLElement* nameEl = product->FirstChildElement("Name");
+
+                // Case 1: Search for a specific library name in NativeAccess.xml database
+                if (libraryName != nullptr) {
+                    if (nameEl && nameEl->GetText() && std::string(nameEl->GetText()) == libraryName) {
+                        const tinyxml2::XMLElement* snpidEl = product->FirstChildElement("SNPID");
+                        return snpidEl ? snpidEl->GetText() : "";
+                    }
+                }
+
+                // Case 2: Single file mode (LibraryName.xml) - return SNPID in file
+                else {
+                    const tinyxml2::XMLElement* snpidEl = product->FirstChildElement("SNPID");
+                    return snpidEl ? snpidEl->GetText() : "";
+                }
+            }
+
+            return "";
+        }
+
+        static fs::path GetLocalAppData() {
+            PWSTR path       = nullptr;
+            const HRESULT hr = ::SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &path);
+
+            if (SUCCEEDED(hr)) {
+                fs::path result(path);
+                ::CoTaskMemFree(path);
+                return result;
+            }
+
+            return fs::path {};
         }
     }  // namespace Utils
 
@@ -442,8 +494,8 @@ namespace K8 {
 
     class Registry {
     public:
-        static constexpr std::string_view kPrimaryRoot   = "SOFTWARE\\Native Instruments";
-        static constexpr std::string_view kSecondaryRoot = "SOFTWARE\\WOW6432Node\\Native Instruments";
+        static constexpr auto kPrimaryRoot   = R"(SOFTWARE\Native Instruments)";
+        static constexpr auto kSecondaryRoot = R"(SOFTWARE\WOW6432Node\Native Instruments)";
 
         static bool EnableBackupPrivileges() {
             HANDLE hToken;
@@ -600,15 +652,15 @@ namespace K8 {
             std::vector<std::string> keys;
             std::vector<std::string> keysSecondary;
 
-            bool opened = Registry::OpenKey(&keyPrimary, HKEY_LOCAL_MACHINE, Registry::kPrimaryRoot.data(), KEY_READ);
+            bool opened = Registry::OpenKey(&keyPrimary, HKEY_LOCAL_MACHINE, Registry::kPrimaryRoot, KEY_READ);
             if (opened) {
-                keys = Registry::EnumerateKeys(keyPrimary, Registry::kPrimaryRoot.data());
+                keys = Registry::EnumerateKeys(keyPrimary, Registry::kPrimaryRoot);
                 Registry::CloseKey(keyPrimary);
             }
 
-            opened = Registry::OpenKey(&keySecondary, HKEY_LOCAL_MACHINE, Registry::kSecondaryRoot.data(), KEY_READ);
+            opened = Registry::OpenKey(&keySecondary, HKEY_LOCAL_MACHINE, Registry::kSecondaryRoot, KEY_READ);
             if (opened) {
-                keysSecondary = Registry::EnumerateKeys(keySecondary, Registry::kSecondaryRoot.data());
+                keysSecondary = Registry::EnumerateKeys(keySecondary, Registry::kSecondaryRoot);
                 Registry::CloseKey(keySecondary);
             }
 
@@ -684,6 +736,10 @@ namespace K8 {
         Library GetLibrary(const std::string& libraryName) {
             return std::make_pair(libraryName, _libraries.at(libraryName));
         }
+
+        size_t Count() const {
+            return _libraries.size();
+        }
     };
 
 #pragma endregion
@@ -693,7 +749,7 @@ namespace K8 {
     namespace Dialog {
         struct RemoveSelectedDialogData {
             Library library;
-            bool backupCacheFiles;
+            bool backupRegistry;
             bool removeContentDir;
         };
 
@@ -784,7 +840,9 @@ namespace K8 {
                 return (INT_PTR)FALSE;
             }
 
-            static INT_PTR CALLBACK Remove(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {}
+            static INT_PTR CALLBACK Remove(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+                return (INT_PTR)FALSE;
+            }
 
             static INT_PTR CALLBACK RemoveSelected(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 static RemoveSelectedDialogData* data = nullptr;
@@ -817,7 +875,7 @@ namespace K8 {
 
                         ::CheckDlgButton(hwnd,
                                          IDC_REMOVE_SELECTED_BACKUP_CHECK,
-                                         data->backupCacheFiles ? BST_CHECKED : BST_UNCHECKED);
+                                         data->backupRegistry ? BST_CHECKED : BST_UNCHECKED);
                         ::CheckDlgButton(hwnd,
                                          IDC_REMOVE_SELECTED_CONTENT_DIR_CHECK,
                                          data->removeContentDir ? BST_CHECKED : BST_UNCHECKED);
@@ -848,7 +906,7 @@ namespace K8 {
                     case WM_COMMAND: {
                         switch (LOWORD(wParam)) {
                             case ID_REMOVE_SELECTED_REMOVE: {
-                                data->backupCacheFiles =
+                                data->backupRegistry =
                                   (::IsDlgButtonChecked(hwnd, IDC_REMOVE_SELECTED_BACKUP_CHECK) == BST_CHECKED);
                                 data->removeContentDir =
                                   (::IsDlgButtonChecked(hwnd, IDC_REMOVE_SELECTED_CONTENT_DIR_CHECK) == BST_CHECKED);
@@ -875,7 +933,9 @@ namespace K8 {
                 return (INT_PTR)FALSE;
             }
 
-            static INT_PTR CALLBACK RelocateSelected(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {}
+            static INT_PTR CALLBACK RelocateSelected(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+                return (INT_PTR)FALSE;
+            }
         }  // namespace DialogProc
 
         static void ShowAbout(HINSTANCE hInst, HWND hwnd, const char* version) {
@@ -906,7 +966,56 @@ namespace K8 {
 
 #pragma endregion
 
-#pragma region Threads
+#pragma region I/O
+
+    namespace IO {
+        std::vector<wchar_t> MakeDoubleNullTerminated(const fs::path& path) {
+            std::wstring pathStr = path.wstring();
+            std::vector<wchar_t> buffer(pathStr.size() + 2, L'\0');
+            std::ranges::copy(pathStr, buffer.begin());
+            return buffer;
+        }
+    }  // namespace IO
+
+    namespace File {
+        static bool Delete(const fs::path& file) {
+            const bool deleted = ::DeleteFile(file.string().c_str());
+            return deleted;
+        }
+
+        static bool Copy(const fs::path& src, const fs::path& dst, bool overwrite = true) {
+            const bool copied = ::CopyFile(src.string().c_str(), dst.string().c_str(), !overwrite);
+            return copied;
+        }
+    }  // namespace File
+
+    namespace Directory {
+        static bool Delete(const fs::path& path) {
+            const auto pFrom = IO::MakeDoubleNullTerminated(path);
+
+            SHFILEOPSTRUCTW fileOp = {};
+            fileOp.wFunc           = FO_DELETE;
+            fileOp.pFrom           = pFrom.data();
+            fileOp.fFlags          = FOF_NO_UI | FOF_NOCONFIRMATION;
+
+            return (::SHFileOperationW(&fileOp) == 0);
+        }
+
+        static bool Copy(const fs::path& src, const fs::path& dst) {
+            const auto pFrom = IO::MakeDoubleNullTerminated(src);
+            const auto pTo   = IO::MakeDoubleNullTerminated(dst);
+
+            SHFILEOPSTRUCTW fileOp = {};
+            fileOp.wFunc           = FO_COPY;
+            fileOp.pFrom           = pFrom.data();
+            fileOp.pTo             = pTo.data();
+            fileOp.fFlags          = FOF_NO_UI;
+
+            return (::SHFileOperationW(&fileOp) == 0);
+        }
+    }  // namespace Directory
+
+#pragma endregion
 
     class Threads {
     public:
@@ -916,10 +1025,149 @@ namespace K8 {
         };
 
         static void RemoveSelected(HWND hwnd, const Dialog::RemoveSelectedDialogData* data) {
-            auto* result      = new RemoveSelectedResult;
-            result->success   = true;
-            result->cancelled = false;
-            ::PostMessage(hwnd, WM_REMOVE_SELECTED_COMPLETED, 0, (LPARAM)result);
+            const auto start = std::chrono::high_resolution_clock::now();
+
+            const auto name       = data->library.first.c_str();
+            const auto contentDir = data->library.second.c_str();
+
+            auto* result = new RemoveSelectedResult;
+
+            auto finish = [&](bool success) {
+                result->success   = success;
+                result->cancelled = false;
+                ::PostMessage(hwnd, WM_REMOVE_SELECTED_COMPLETED, 0, (LPARAM)result);
+                delete data;
+            };
+
+            // 1. Find SNPID
+            const char* libraryName = nullptr;
+            fs::path xmlFile        = fs::path(Globals::kServiceCenter) / std::format("{}.xml", name);
+            if (!fs::exists(xmlFile)) {
+                xmlFile     = Globals::kNativeAccessXML;
+                libraryName = name;
+            }
+            const auto SNPID = Utils::FindSNPID(xmlFile, libraryName);
+            if (SNPID.empty()) {
+                _WARN("Did not find an associated SNPID for library: %s", name);
+            } else {
+                _INFO("Found SNPID for library: %s (SNPID: %s)", name, SNPID.c_str());
+            }
+
+            // 2. Delete .XML file
+            if (xmlFile != fs::path(Globals::kNativeAccessXML)) {
+                if (!File::Delete(xmlFile)) {
+                    _ERROR("Failed to delete XML file: %s", xmlFile.string().c_str());
+                    return finish(false);
+                }
+                _INFO("Deleted XML manifest: %s", xmlFile.string().c_str());
+            }
+
+            // 3. Delete .cache file
+            fs::path cacheFileToDelete = {};
+            for (const auto& cacheFile : fs::directory_iterator(Utils::GetLocalAppData() / Globals::kLibrariesCache)) {
+                if (cacheFile.is_regular_file() && cacheFile.path().extension() == ".cache") {
+                    // Check filename
+                    const auto filename  = cacheFile.path().filename().string();
+                    const auto fileSnpid = filename.substr(1, 3);  // Cache file names begin with "K"
+                    if (fileSnpid == SNPID) {
+                        cacheFileToDelete = filename;
+                        break;
+                    }
+                }
+            }
+
+            if (fs::exists(cacheFileToDelete)) {
+                if (!File::Delete(cacheFileToDelete)) {
+                    _ERROR("Failed to delete cache: %s", cacheFileToDelete.string().c_str());
+                    return finish(false);
+                }
+
+                _INFO("Deleted library cache file: %s", cacheFileToDelete.string().c_str());
+            }
+
+            // 4. Delete and backup komplete.db3
+            const auto db3Path = Utils::GetLocalAppData() / Globals::kKompleteDB3;
+            if (!fs::exists(db3Path)) {
+                _WARN("komplete.db3 is missing. It may have already been deleted.");
+            } else {
+                if (!File::Copy(db3Path, db3Path.string() + ".bak")) {
+                    _ERROR("Failed to create a backup of komplete.db3");
+                    return finish(false);
+                } else {
+                    _INFO("Created a backup of komplete.db3: %s", (db3Path.string() + ".bak").c_str());
+
+                    if (!File::Delete(db3Path)) {
+                        _ERROR("Failed to delete komplete.db3");
+                        return finish(false);
+                    } else {
+                        _INFO("Deleted komplete.db3: %s", db3Path.string().c_str());
+                    }
+                }
+            }
+
+            // 5. TODO: Delete .jwt RAS3 auth token
+
+            // 6. Delete registry entry(s)
+            const auto primaryKeyPath   = std::format("{}\\{}", Registry::kPrimaryRoot, name);
+            const auto secondaryKeyPath = std::format("{}\\{}", Registry::kSecondaryRoot, name);
+
+            auto deleteKey = [](const std::string& keyPath, const std::string& libName, bool backup) -> bool {
+                HKEY key;
+                if (Registry::OpenKey(&key, HKEY_LOCAL_MACHINE, keyPath, KEY_ALL_ACCESS)) {
+                    if (backup) {
+                        const auto backupFilename = fs::path("backup") / std::format("{}.reg", libName);
+                        if (fs::exists(backupFilename)) {
+                            if (!File::Delete(backupFilename)) {
+                                _WARN("Failed to delete backup file: %s. Unable to backup registry entry.",
+                                      backupFilename.string().c_str());
+                            }
+                        }
+
+                        const auto backedUp =
+                          ::RegSaveKeyExA(key, backupFilename.string().c_str(), nullptr, REG_LATEST_FORMAT) ==
+                          ERROR_SUCCESS;
+                        if (!backedUp) {
+                            _WARN("Failed to backup registry key: %s", backupFilename.string().c_str());
+                        }
+                    }
+
+                    Registry::CloseKey(key);
+                    const bool deleted = Registry::DeleteKey(HKEY_LOCAL_MACHINE, keyPath.c_str());
+                    if (!deleted) {
+                        _ERROR("Failed to delete key: %s", keyPath.c_str());
+                        return false;
+                    }
+
+                    _INFO("Deleted registry key: %s", keyPath.c_str());
+                }
+
+                return true;
+            };
+
+            if (!deleteKey(primaryKeyPath, name, data->backupRegistry)) {
+                _ERROR("Failed to delete primary registry key: %s", primaryKeyPath.c_str());
+                return finish(false);
+            }
+
+            if (!deleteKey(secondaryKeyPath, name, data->backupRegistry)) {
+                _WARN("Failed to delete secondary registry key: %s. It may not exist.", secondaryKeyPath.c_str());
+            }
+
+            // 7. Delete content directory
+            if (data->removeContentDir) {
+                if (!Directory::Delete(contentDir)) {
+                    _ERROR("Failed to delete content directory: %s", contentDir);
+                    return finish(false);
+                }
+
+                _INFO("Deleted content directory: %s", contentDir);
+            }
+
+            const auto end     = std::chrono::high_resolution_clock::now();
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+            _INFO("Finished removing library \"%s\" (took %.2f seconds)", name, elapsed.count() / 1000.f);
+
+            return finish(true);
         }
     };
 
@@ -940,20 +1188,24 @@ namespace K8 {
         LPCSTR _title;
         UINT _width, _height;
         int _nCmdShow;
-        bool _console_attached {false};
+        bool _consoleAttached {false};
 
         // UI Members
         HFONT _font;
+        HWND _label;
         HWND _listView;
         HWND _removeButton;
         HWND _removeSelectedButton;
         HWND _relocateSelectedButton;
+        HWND _rescanLibrariesButton;
 
         // UI Element IDs
         static constexpr int kIDC_ListView               = 101;
         static constexpr int kIDC_RemoveButton           = 102;
         static constexpr int kIDC_RemoveSelectedButton   = 103;
         static constexpr int kIDC_RelocateSelectedButton = 104;
+        static constexpr int kIDC_SelectLibraryLabel     = 105;
+        static constexpr int kIDC_RescanLibrariesButton  = 106;
 
         // Business-logic members
         LibraryManager _libManager   = {};
@@ -992,14 +1244,14 @@ namespace K8 {
                 FILE* fDummy;
                 freopen_s(&fDummy, "CONOUT$", "w", stdout);
                 freopen_s(&fDummy, "CONOUT$", "w", stderr);
-                _console_attached = true;
+                _consoleAttached = true;
             } else {
-                _console_attached = false;
+                _consoleAttached = false;
             }
         }
 
         void ReleaseConsole() {
-            if (!_console_attached)
+            if (!_consoleAttached)
                 return;
 
             if (!FreeConsole()) {
@@ -1007,7 +1259,7 @@ namespace K8 {
                 return;
             }
 
-            _console_attached = false;
+            _consoleAttached = false;
         }
 
         void Initialize() {
@@ -1015,14 +1267,19 @@ namespace K8 {
             AttachConsole();
 #endif
 
-            g_Logger.SetConsoleAttached(_console_attached);
+            g_Logger.SetConsoleAttached(_consoleAttached);
 
             if (!Registry::EnableBackupPrivileges()) {
                 throw ApplicationError("Failed to enable registry backup privileges.");
             }
 
+            // Create backup directory if it does not exist
+            if (!fs::exists("backup")) {
+                fs::create_directory("backup");
+            }
+
             // Initialize COM
-            auto hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+            auto hr = ::CoInitializeEx(nullptr, COINIT_MULTITHREADED);
             if (FAILED(hr)) {
                 throw ApplicationError("Failed to initialize COM library.");
             }
@@ -1075,7 +1332,7 @@ namespace K8 {
 #ifndef NDEBUG
             ReleaseConsole();
 #endif
-            CoUninitialize();
+            ::CoUninitialize();
         }
 
         void RescanAndReset() {
@@ -1084,6 +1341,7 @@ namespace K8 {
             _selectedIndex   = -1;
             ::EnableWindow(_relocateSelectedButton, false);
             ::EnableWindow(_removeSelectedButton, false);
+            ::SetWindowText(_label, std::format("Select a library to remove (found {}):", _libManager.Count()).c_str());
         }
 
         void OnCreate(HWND hwnd) {
@@ -1119,18 +1377,32 @@ namespace K8 {
             AppendMenu(hMenubar, MF_POPUP, (UINT_PTR)hMenu, "&Menu");
             SetMenu(hwnd, hMenubar);
 
-            const HWND label = ::CreateWindow("STATIC",
-                                              "Select a library to remove:",
-                                              WS_CHILD | WS_VISIBLE | SS_LEFT,
-                                              10,
-                                              10,
-                                              300,
-                                              16,
-                                              hwnd,
-                                              nullptr,
-                                              _hInstance,
-                                              nullptr);
-            ::SendMessage(label, WM_SETFONT, (WPARAM)_font, TRUE);
+            _label = ::CreateWindow("STATIC",
+                                    "Select a library to remove:",
+                                    WS_CHILD | WS_VISIBLE | SS_LEFT,
+                                    10,
+                                    10,
+                                    220,
+                                    16,
+                                    hwnd,
+                                    (HMENU)kIDC_SelectLibraryLabel,
+                                    _hInstance,
+                                    nullptr);
+            ::SendMessage(_label, WM_SETFONT, (WPARAM)_font, TRUE);
+
+            _rescanLibrariesButton = ::CreateWindowEx(0,
+                                                      "BUTTON",
+                                                      "Rescan Libraries",
+                                                      WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                                      _width - 146,
+                                                      5,
+                                                      120,
+                                                      25,
+                                                      hwnd,
+                                                      (HMENU)kIDC_RescanLibrariesButton,
+                                                      _hInstance,
+                                                      nullptr);
+            ::SendMessage(_rescanLibrariesButton, WM_SETFONT, (WPARAM)_font, TRUE);
 
             _listView = ::CreateWindowEx(WS_EX_CLIENTEDGE,
                                          WC_LISTVIEW,
@@ -1166,7 +1438,7 @@ namespace K8 {
             _removeButton               = ::CreateWindowEx(0,
                                              "BUTTON",
                                              "Remove...",
-                                             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_DEFPUSHBUTTON,
                                              10,
                                              320,
                                              buttonWidth,
@@ -1206,6 +1478,8 @@ namespace K8 {
             ::SendMessage(_relocateSelectedButton, WM_SETFONT, (WPARAM)_font, TRUE);
 
             _libManager.Scan(_listView);
+
+            ::SetWindowText(_label, std::format("Select a library to remove (found {}):", _libManager.Count()).c_str());
         }
 
         void OnRemove() {
@@ -1217,21 +1491,22 @@ namespace K8 {
             if (_selectedLibrary.empty())
                 return;
 
-            Dialog::RemoveSelectedDialogData data;
-            data.library          = _libManager.GetLibrary(_selectedLibrary);
-            data.backupCacheFiles = false;
-            data.removeContentDir = true;
+            auto* data             = new Dialog::RemoveSelectedDialogData;
+            data->library          = _libManager.GetLibrary(_selectedLibrary);
+            data->backupRegistry   = false;
+            data->removeContentDir = true;
 
-            const auto result = Dialog::ShowRemoveSelected(_hInstance, _hwnd, &data);
+            const auto result = Dialog::ShowRemoveSelected(_hInstance, _hwnd, data);
             if (result == ID_REMOVE_SELECTED_REMOVE) {
-                _INFO("Removing library:\n  - %s\n  - %s\n  - Backup: %s\n  - Remove Content: %s\n\n",
-                      _selectedLibrary.c_str(),
-                      data.library.second.c_str(),
-                      data.backupCacheFiles ? "True" : "False",
-                      data.removeContentDir ? "True" : "False");
+                _INFO(
+                  "Removing library:\n  - Name: %s\n  - Content Directory: %s\n  - Backup: %s\n  - Remove Content: %s",
+                  _selectedLibrary.c_str(),
+                  data->library.second.c_str(),
+                  data->backupRegistry ? "True" : "False",
+                  data->removeContentDir ? "True" : "False");
 
                 // Spawn removal thread
-                std::thread(Threads::RemoveSelected, _hwnd, &data).detach();
+                std::thread(Threads::RemoveSelected, _hwnd, data).detach();
             }
         }
 
@@ -1247,7 +1522,7 @@ namespace K8 {
                            "K8Tool",
                            MB_YESNO | MB_ICONQUESTION);
             if (response == IDYES) {
-                _libManager.Scan(_listView, true);
+                RescanAndReset();
             }
         }
 
@@ -1376,6 +1651,7 @@ namespace K8 {
                             break;
                         }
 
+                        case kIDC_RescanLibrariesButton:
                         case ID_MENU_RESCAN_LIBRARIES: {
                             OnRescanLibraries();
                             break;
