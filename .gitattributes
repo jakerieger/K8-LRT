@@ -2,3 +2,4 @@
 *.txt linguist-vendored
 CMakeLists.txt linguist-vendored
 *.h linguist-language=C++
+vendor/* linguist-vendored
