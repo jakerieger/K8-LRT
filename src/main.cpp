@@ -86,8 +86,11 @@
 #include <memory>
 #include <thread>
 #include <filesystem>
+#include <stop_token>
 
 // Windows API
+#define WIN32_LEAN_AND_MEAN 1
+#define NOMINMAX 1
 #include <commctrl.h>
 #include <shellapi.h>
 #include <shlobj.h>
@@ -95,8 +98,18 @@
 #include <winhttp.h>
 #include <winreg.h>
 
+// Conflicts with zip_file.hpp (I don't need these anyway)
+#ifdef min
+    #undef min
+#endif
+
+#ifdef max
+    #undef max
+#endif
+
 // Vendor
 #include <tinyxml2.h>
+#include <zip_file.hpp>
 
 #define _UNUSED(x) (void)(x)
 
@@ -120,6 +133,7 @@ namespace K8 {
 
 #define WM_UPDATE_CHECK_COMPLETED (WM_USER + 1)
 #define WM_REMOVE_SELECTED_COMPLETED (WM_USER + 2)
+#define WM_COLLECT_BACKUPS_COMPLETED (WM_USER + 3)
 
 #pragma endregion
 
@@ -526,8 +540,6 @@ namespace K8 {
                 _WARN("Failed to open registry key: %s", path.c_str());
                 return false;
             }
-
-            _INFO("Opened registry key: %s", path.c_str());
             return true;
         }
 
@@ -693,7 +705,6 @@ namespace K8 {
                 Registry::CloseKey(subkey);
 
                 _libraries.insert_or_assign(library.first, library.second);
-                _INFO("Found library: %s\n  - (%s)", library.first.c_str(), library.second.c_str());
 
                 // Insert into ListView
                 LVITEM lvi  = {0};
@@ -704,6 +715,8 @@ namespace K8 {
                 int index = ListView_InsertItem(listView, &lvi);
                 ListView_SetItemText(listView, index, 1, (char*)library.second.c_str());
             }
+
+            _INFO("Scan completed successfully. Found %d libraries.", (int)_libraries.size());
 
             if (showDlg) {
                 ::MessageBox(
@@ -1017,14 +1030,13 @@ namespace K8 {
 
 #pragma endregion
 
-    class Threads {
-    public:
+    namespace Threads {
         struct RemoveSelectedResult {
             bool success;
             bool cancelled;
         };
 
-        static void RemoveSelected(HWND hwnd, const Dialog::RemoveSelectedDialogData* data) {
+        static void RemoveSelected(HWND hwnd, const Dialog::RemoveSelectedDialogData* data, std::stop_token stoken) {
             const auto start = std::chrono::high_resolution_clock::now();
 
             const auto name       = data->library.first.c_str();
@@ -1032,11 +1044,19 @@ namespace K8 {
 
             auto* result = new RemoveSelectedResult;
 
-            auto finish = [&](bool success) {
+            auto finish = [&](bool success, bool cancelled = false) {
                 result->success   = success;
                 result->cancelled = false;
                 ::PostMessage(hwnd, WM_REMOVE_SELECTED_COMPLETED, 0, (LPARAM)result);
                 delete data;
+            };
+
+            auto checkCancelled = [&]() -> bool {
+                if (stoken.stop_requested()) {
+                    finish(false, true);
+                    return true;
+                }
+                return false;
             };
 
             // 1. Find SNPID
@@ -1052,6 +1072,8 @@ namespace K8 {
             } else {
                 _INFO("Found SNPID for library: %s (SNPID: %s)", name, SNPID.c_str());
             }
+            if (checkCancelled())
+                return;
 
             // 2. Delete .XML file
             if (xmlFile != fs::path(Globals::kNativeAccessXML)) {
@@ -1061,6 +1083,8 @@ namespace K8 {
                 }
                 _INFO("Deleted XML manifest: %s", xmlFile.string().c_str());
             }
+            if (checkCancelled())
+                return;
 
             // 3. Delete .cache file
             fs::path cacheFileToDelete = {};
@@ -1084,6 +1108,8 @@ namespace K8 {
 
                 _INFO("Deleted library cache file: %s", cacheFileToDelete.string().c_str());
             }
+            if (checkCancelled())
+                return;
 
             // 4. Delete and backup komplete.db3
             const auto db3Path = Utils::GetLocalAppData() / Globals::kKompleteDB3;
@@ -1104,6 +1130,8 @@ namespace K8 {
                     }
                 }
             }
+            if (checkCancelled())
+                return;
 
             // 5. TODO: Delete .jwt RAS3 auth token
 
@@ -1152,6 +1180,8 @@ namespace K8 {
             if (!deleteKey(secondaryKeyPath, name, data->backupRegistry)) {
                 _WARN("Failed to delete secondary registry key: %s. It may not exist.", secondaryKeyPath.c_str());
             }
+            if (checkCancelled())
+                return;
 
             // 7. Delete content directory
             if (data->removeContentDir) {
@@ -1169,7 +1199,7 @@ namespace K8 {
 
             return finish(true);
         }
-    };
+    };  // namespace Threads
 
 #pragma endregion
 
@@ -1189,6 +1219,7 @@ namespace K8 {
         UINT _width, _height;
         int _nCmdShow;
         bool _consoleAttached {false};
+        std::jthread _worker {};
 
         // UI Members
         HFONT _font;
@@ -1239,6 +1270,13 @@ namespace K8 {
         }
 
     private:
+        void ToggleButtons(bool enabled) const {
+            ::EnableWindow(_rescanLibrariesButton, enabled);
+            ::EnableWindow(_removeButton, enabled);
+            ::EnableWindow(_removeSelectedButton, enabled);
+            ::EnableWindow(_relocateSelectedButton, enabled);
+        }
+
         void AttachConsole() {
             if (::AttachConsole(ATTACH_PARENT_PROCESS)) {
                 FILE* fDummy;
@@ -1336,6 +1374,22 @@ namespace K8 {
         }
 
         void RescanAndReset() {
+            if (_worker.joinable()) {
+                const auto resp =
+                  ::MessageBox(_hwnd,
+                               "Cannot perform scan while an operation is in progress. Would you like to terminate it?",
+                               "K8Tool",
+                               MB_YESNO | MB_ICONWARNING);
+                if (resp == IDYES) {
+                    _worker.request_stop();
+                    if (_worker.joinable()) {
+                        _worker.join();
+                    }
+                } else {
+                    return;
+                }
+            }
+
             _libManager.Scan(_listView, true);
             _selectedLibrary = "";
             _selectedIndex   = -1;
@@ -1488,6 +1542,14 @@ namespace K8 {
         }
 
         void OnRemoveSelected() {
+            if (_worker.joinable()) {
+                ::MessageBox(_hwnd,
+                             "An operation is already running. Please wait until it finishes.",
+                             "K8Tool",
+                             MB_OK | MB_ICONWARNING);
+                return;
+            }
+
             if (_selectedLibrary.empty())
                 return;
 
@@ -1506,7 +1568,8 @@ namespace K8 {
                   data->removeContentDir ? "True" : "False");
 
                 // Spawn removal thread
-                std::thread(Threads::RemoveSelected, _hwnd, data).detach();
+                _worker = std::jthread([&](std::stop_token stoken) { Threads::RemoveSelected(_hwnd, data, stoken); });
+                ToggleButtons(false);
             }
         }
 
@@ -1526,6 +1589,28 @@ namespace K8 {
             }
         }
 
+        void OnCollectBackups() const {
+            std::thread([&] {
+                if (!fs::exists("backup")) {
+                    ::PostMessage(_hwnd, WM_COLLECT_BACKUPS_COMPLETED, 0, (LPARAM) nullptr);
+                }
+
+                miniz_cpp::zip_file zip;
+                for (const auto& backup : fs::directory_iterator("backup")) {
+                    if (backup.is_regular_file() && backup.path().filename().extension() == ".reg") {
+                        zip.write(backup.path().string());
+                    }
+                }
+
+                const auto timestamp = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+                const auto filename  = std::format("K8Tool-Backup-{}.zip", timestamp);
+                zip.save(filename);
+
+                const char* result = _strdup(filename.c_str());
+                ::PostMessage(_hwnd, WM_COLLECT_BACKUPS_COMPLETED, 0, (LPARAM)result);
+            }).detach();
+        }
+
         void OnExit() const {
             const auto response =
               ::MessageBox(_hwnd, "Are you sure you want to exit?", "K8Tool", MB_YESNO | MB_ICONQUESTION);
@@ -1537,6 +1622,7 @@ namespace K8 {
         void OnUpdateCheckCompleted(const Update::CheckResult* result) const {
             switch (result->compare) {
                 case Update::kResultCurrent: {
+                    _INFO("Update check completed (UP-TO-DATE)");
                     ::MessageBox(_hwnd, "You're running the latest version!", "Update", MB_OK | MB_ICONINFORMATION);
                     break;
                 }
@@ -1548,6 +1634,7 @@ namespace K8 {
                                                      "Visit the GitHub releases page to download?",
                                                      VER_PRODUCTVERSION_STR,
                                                      &result->currentVersion[0] + 1);
+                    _INFO("Update check completed (OUTDATED)");
 
                     const int response =
                       ::MessageBox(_hwnd, message.c_str(), "Update Available", MB_YESNO | MB_ICONINFORMATION);
@@ -1568,7 +1655,7 @@ namespace K8 {
                                   "stable release of K8Tool.",
                                   &result->currentVersion[0] + 1,
                                   VER_PRODUCTVERSION_STR);
-
+                    _INFO("Update check completed (DEV BUILD)");
                     ::MessageBox(_hwnd, message.c_str(), "Update", MB_OK | MB_ICONWARNING);
                     break;
                 }
@@ -1577,18 +1664,23 @@ namespace K8 {
         }
 
         void OnRemoveSelectedCompleted(const Threads::RemoveSelectedResult* result) {
-            if (result->success) {
+            const bool success   = result->success;
+            const bool cancelled = result->cancelled;
+            delete result;
+
+            _worker = {};
+            ToggleButtons(true);
+
+            if (success) {
                 ::MessageBox(_hwnd, "Library removed successfully.", "K8Tool", MB_OK | MB_ICONINFORMATION);
                 RescanAndReset();
             } else {
-                if (result->cancelled) {
+                if (cancelled) {
                     ::MessageBox(_hwnd, "Operation was cancelled.", "K8Tool", MB_OK | MB_ICONWARNING);
                 } else {
                     ::MessageBox(_hwnd, "Failed to remove library.", "K8Tool", MB_OK | MB_ICONERROR);
                 }
             }
-
-            delete result;
         }
 
         LRESULT CALLBACK HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -1671,6 +1763,11 @@ namespace K8 {
                             OnExit();
                             break;
                         }
+
+                        case ID_MENU_COLLECT_BACKUPS: {
+                            OnCollectBackups();
+                            break;
+                        }
                     }
 
                     return 0;
@@ -1704,6 +1801,20 @@ namespace K8 {
                     }
                     OnRemoveSelectedCompleted(result);
                     break;
+                }
+
+                case WM_COLLECT_BACKUPS_COMPLETED: {
+                    const auto result = reinterpret_cast<const char*>(lParam);
+                    if (!result) {
+                        _ERROR("Failed to collect backups.");
+                        ::MessageBox(_hwnd, "Failed to collect backups.", "K8Tool", MB_ICONERROR | MB_OK);
+                    }
+
+                    const auto _msg = std::format("Collected backups to:\n{}",
+                                                  fs::absolute(fs::current_path() / result).string().c_str());
+                    _INFO(_msg.c_str());
+                    ::MessageBox(_hwnd, _msg.c_str(), "K8Tool", MB_ICONINFORMATION | MB_OK);
+                    delete result;
                 }
             }
 

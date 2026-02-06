@@ -52,7 +52,7 @@ BEGIN
     LTEXT           "- Delete registry entries\n- Remove XML configuration files\n- Clear library cache files\n- Reset the Kontakt database\n- Remove Native Access JWT tokens", 
                     IDC_REMOVE_SELECTED_INFO_TEXT, 24, 74, 272, 50
     
-    CONTROL         "Backup cache files before deleting", IDC_REMOVE_SELECTED_BACKUP_CHECK, "Button",
+    CONTROL         "Backup registry", IDC_REMOVE_SELECTED_BACKUP_CHECK, "Button",
                     BS_AUTOCHECKBOX | WS_TABSTOP, 14, 138, 130, 10
     CONTROL         "Delete library content directory", IDC_REMOVE_SELECTED_CONTENT_DIR_CHECK, "Button",
                     BS_AUTOCHECKBOX | WS_TABSTOP, 160, 138, 136, 10
