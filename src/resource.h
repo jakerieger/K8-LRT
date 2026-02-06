@@ -30,6 +30,11 @@
 #define ID_REMOVE_SELECTED_CANCEL 508
 #define IDC_REMOVE_SELECTED_WARNING_TEXT 509
 
+// Progress dialog
+#define IDD_PROGRESS_BOX 601
+#define IDC_PROGRESS_BAR 602
+#define IDC_PROGRESS_TEXT 602
+
 // // Removal dialog
 // #define IDD_REMOVE_BOX 601
 // #define IDC_BATCH_LIBRARY_LIST 602

@@ -87,6 +87,7 @@
 #include <thread>
 #include <filesystem>
 #include <stop_token>
+#include <optional>
 
 // Windows API
 #define WIN32_LEAN_AND_MEAN 1
@@ -111,7 +112,7 @@
 #include <tinyxml2.h>
 #include <zip_file.hpp>
 
-#define _UNUSED(x) (void)(x)
+#define _Unused(x) (void)(x)
 
 namespace K8 {
     namespace fs = std::filesystem;
@@ -134,11 +135,14 @@ namespace K8 {
 #define WM_UPDATE_CHECK_COMPLETED (WM_USER + 1)
 #define WM_REMOVE_SELECTED_COMPLETED (WM_USER + 2)
 #define WM_COLLECT_BACKUPS_COMPLETED (WM_USER + 3)
+#define WM_UPDATE_PROGRESS_TEXT (WM_USER + 4)
+#define WM_RELOCATE_SELECTED_COMPLETED (WM_USER + 5)
+#define WM_REMOVE_COMPLETED (WM_USER + 6)
 
 #pragma endregion
 
 #pragma region Logging
-    static constexpr std::string_view kLogFilename = "K8.log";
+    static constexpr auto kLogFilename = "K8.log";
 
     enum class LogLevel {
         Info,
@@ -154,7 +158,7 @@ namespace K8 {
 
     public:
         Logger() {
-            const errno_t result = fopen_s(&_file, kLogFilename.data(), "a+");
+            const errno_t result = fopen_s(&_file, kLogFilename, "a+");
             if (result == 0) {
                 Log(LogLevel::Info, "--- K8Tool Started ---");
             } else {
@@ -263,23 +267,125 @@ namespace K8 {
         }
     };
 
-    static Logger g_Logger;
+    inline Logger* logger;
 
-#define _INFO(fmt, ...) g_Logger.Log(LogLevel::Info, fmt, ##__VA_ARGS__)
-#define _WARN(fmt, ...) g_Logger.Log(LogLevel::Warn, fmt, ##__VA_ARGS__)
-#define _ERROR(fmt, ...) g_Logger.Log(LogLevel::Error, fmt, ##__VA_ARGS__)
-#define _FATAL(fmt, ...)                                                                                               \
+#define _Info(fmt, ...) logger->Log(LogLevel::Info, fmt, ##__VA_ARGS__)
+#define _Warn(fmt, ...) logger->Log(LogLevel::Warn, fmt, ##__VA_ARGS__)
+#define _Error(fmt, ...) logger->Log(LogLevel::Error, fmt, ##__VA_ARGS__)
+#define _Debug(fmt, ...) logger->Log(LogLevel::Debug, fmt, ##__VA_ARGS__)
+#define _Fatal(fmt, ...)                                                                                               \
     do {                                                                                                               \
-        g_Logger.Log(LogLevel::Fatal, fmt, ##__VA_ARGS__);                                                             \
+        logger->Log(LogLevel::Fatal, fmt, ##__VA_ARGS__);                                                              \
+        ::MessageBox(nullptr, fmt, "K8Tool", MB_OK | MB_ICONERROR);                                                    \
         std::quick_exit(-1);                                                                                           \
-    } while (FALSE)
-#define _LOG(fmt, ...) g_Logger.Log(LogLevel::Debug, fmt, ##__VA_ARGS__)
+    } while (0);
+
 #pragma endregion
 
-#pragma region Utils
+#pragma region StringPool
 
-    namespace Utils {
-        static std::string LF_To_CRLF(const std::string& input) {
+    class StringPool {
+        std::vector<std::unique_ptr<char[]>> _pool;
+        std::unordered_map<std::string_view, const char*> _strings;
+
+    public:
+        StringPool() = default;
+
+        const char* Intern(const std::string& str) {
+            if (const auto it = _strings.find(str); it != _strings.end()) {
+                return it->second;
+            }
+
+            const auto len = str.length() + 1;
+            auto copy      = std::make_unique<char[]>(len);
+            std::memcpy(copy.get(), str.c_str(), len);
+
+            const char* ptr = copy.get();
+            _pool.push_back(std::move(copy));
+            _strings[std::string_view(ptr, len - 1)] = ptr;
+
+            return ptr;
+        }
+    };
+
+#pragma endregion
+
+#pragma region Data
+
+    struct LibraryInfo {
+        const char* name;        // str pool
+        const char* contentDir;  // str pool
+        HKEY registryRoot;       // HKEY_LOCAL_MACHINE or HKEY_CURRENT_USER
+        const char* subKey;      // str pool
+    };
+
+    using LibraryList = std::vector<LibraryInfo>;
+
+#pragma endregion
+
+#pragma region Utility
+
+    namespace Util {
+        static bool PathExists(const fs::path& path) {
+            std::error_code ec;
+            return fs::exists(path, ec);
+        }
+
+        static bool DeletePath(const fs::path& path) {
+            std::error_code ec;
+            return fs::remove_all(path, ec);
+            return !ec;
+        }
+
+        static std::string GetEnvVar(const char* name) {
+            char* buffer      = nullptr;
+            size_t size       = 0;
+            const errno_t err = _dupenv_s(&buffer, &size, name);
+            if (err != 0 || !buffer) {
+                return {};
+            }
+            std::string result(buffer);
+            free(buffer);
+            return result;
+        }
+
+        static std::string GetLocalAppData() {
+            return GetEnvVar("LOCALAPPDATA");
+        }
+
+        static std::string GetUserProfile() {
+            return GetEnvVar("USERPROFILE");
+        }
+
+        static std::string GetCommonDocuments() {
+            return GetEnvVar("PUBLIC");
+        }
+
+        static bool FileExists(const fs::path& path) {
+            std::error_code ec;
+            return fs::exists(path, ec) && !fs::is_directory(path, ec);
+        }
+
+        static std::wstring ToWideStr(const std::string& str) {
+            if (str.empty())
+                return {};
+            const int size = ::MultiByteToWideChar(CP_UTF8, 0, str.data(), (int)str.size(), nullptr, 0);
+            std::wstring result(size, 0);
+            MultiByteToWideChar(CP_UTF8, 0, str.data(), (int)str.size(), result.data(), size);
+            return result;
+        }
+
+        static std::string ToStr(const std::wstring& wstr) {
+            if (wstr.empty())
+                return {};
+            const int size =
+              ::WideCharToMultiByte(CP_UTF8, 0, wstr.data(), (int)wstr.size(), nullptr, 0, nullptr, nullptr);
+            std::string result(size, 0);
+            ::WideCharToMultiByte(CP_UTF8, 0, wstr.data(), (int)wstr.size(), result.data(), size, nullptr, nullptr);
+            return result;
+        }
+
+        static std::string ToCRLF(const std::string& input) {
             std::string output;
             output.reserve(input.size() + (input.size() / 10));
 
@@ -291,323 +397,120 @@ namespace K8 {
 
             return output;
         }
-
-        static std::string FindSNPID(const fs::path& xmlFile, const char* libraryName) {
-            tinyxml2::XMLDocument doc;
-
-            if (doc.LoadFile(xmlFile.string().c_str()) != tinyxml2::XML_SUCCESS) {
-                return "";
-            }
-
-            tinyxml2::XMLElement* root = doc.FirstChildElement("ProductHints");
-            if (!root)
-                return "";
-
-            for (tinyxml2::XMLElement* product = root->FirstChildElement("Product"); product != nullptr;
-                 product                       = product->NextSiblingElement("Product")) {
-                const tinyxml2::XMLElement* nameEl = product->FirstChildElement("Name");
-
-                // Case 1: Search for a specific library name in NativeAccess.xml database
-                if (libraryName != nullptr) {
-                    if (nameEl && nameEl->GetText() && std::string(nameEl->GetText()) == libraryName) {
-                        const tinyxml2::XMLElement* snpidEl = product->FirstChildElement("SNPID");
-                        return snpidEl ? snpidEl->GetText() : "";
-                    }
-                }
-
-                // Case 2: Single file mode (LibraryName.xml) - return SNPID in file
-                else {
-                    const tinyxml2::XMLElement* snpidEl = product->FirstChildElement("SNPID");
-                    return snpidEl ? snpidEl->GetText() : "";
-                }
-            }
-
-            return "";
-        }
-
-        static fs::path GetLocalAppData() {
-            PWSTR path       = nullptr;
-            const HRESULT hr = ::SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &path);
-
-            if (SUCCEEDED(hr)) {
-                fs::path result(path);
-                ::CoTaskMemFree(path);
-                return result;
-            }
-
-            return fs::path {};
-        }
-    }  // namespace Utils
+    }  // namespace Util
 
 #pragma endregion
 
-#pragma region UpdateChecking
+#pragma region XML
 
-    class UpdateError : public std::runtime_error {
-    public:
-        using std::runtime_error::runtime_error;
-    };
-
-    class Update {
-        static constexpr auto kAgent       = L"K8Tool/1.0";
-        static constexpr auto kApiEndpoint = L"api.github.com";
-        static constexpr auto kRepoStub    = L"/repos/jakerieger/K8-LRT/releases/latest";
-
-    public:
-        static constexpr auto kLatestReleaseUrl = "https://github.com/jakerieger/K8-LRT/releases/latest";
-        static constexpr auto kResultCurrent    = 0;
-        static constexpr auto kResultOld        = 1;
-        static constexpr auto kResultFuture     = 2;
-
-        struct CheckResult {
-            std::string currentVersion;
-            int compare;  // 0: Current  1: Old  2: Future
+    namespace XML {
+        struct LibraryXMLInfo {
+            std::string snpid;
+            std::string name;
         };
 
-        static void CheckForUpdates(HWND hwnd) {
-            const auto currentVersion = GetLatestVersion();
-            if (currentVersion.empty())
-                throw UpdateError("Current version string is empty");
+        static std::optional<LibraryXMLInfo> GetSNPID(const fs::path& xmlPath) {
+            namespace x = tinyxml2;
 
-            const auto compare = CompareVersions(currentVersion, VER_PRODUCTVERSION_STR);
+            x::XMLDocument doc;
+            if (doc.LoadFile(xmlPath.string().c_str()) != x::XML_SUCCESS) {
+                _Error("Failed to load XML file: %s", xmlPath.string().c_str());
+                return std::nullopt;
+            }
 
-            auto* result           = new CheckResult;
-            result->currentVersion = currentVersion;
-            if (compare > 0)
-                result->compare = kResultOld;
-            else if (compare < 0)
-                result->compare = kResultFuture;
-            else
-                result->compare = kResultCurrent;
-
-            ::PostMessage(hwnd, WM_UPDATE_CHECK_COMPLETED, 0, (LPARAM)result);
-        }
-
-    private:
-        static std::string ExtractTagName(const std::string& json) {
-            constexpr std::string_view key = "\"tag_name\"";
-            size_t pos                     = json.find(key);
-            if (pos == std::string_view::npos)
-                return "";
-
-            pos = json.find(':', pos + key.length());
-            if (pos == std::string_view::npos)
-                return "";
-
-            size_t start = json.find('"', pos);
-            if (start == std::string_view::npos)
-                return "";
-            start++;
-
-            const size_t end = json.find('"', start);
-            if (end == std::string_view::npos)
-                return "";
-
-            return std::string(json.substr(start, end - start));
-        }
-
-        static int CompareVersions(const std::string& v1, const std::string& v2) {
-            auto parse = [](std::string_view v) {
-                if (!v.empty() && v[0] == 'v')
-                    v.remove_prefix(1);
-
-                int mj = 0, mn = 0, p = 0;
-                char dot;
-
-                std::stringstream ss((std::string(v)));
-                ss >> mj >> dot >> mn >> dot >> p;
-
-                return std::vector<int> {mj, mn, p};
-            };
-
-            const std::vector<int> ver1 = parse(v1);
-            const std::vector<int> ver2 = parse(v2);
-
-            if (ver1 != ver2) {
-                for (size_t i = 0; i < 3; ++i) {
-                    if (ver1[i] != ver2[i])
-                        return ver1[i] - ver2[i];
+            x::XMLElement* root = doc.FirstChildElement("adg:NativeAccess");
+            if (!root) {
+                root = doc.FirstChildElement("NativeAccess");
+                if (!root) {
+                    _Error("Root element not found in XML: %s", xmlPath.string().c_str());
+                    return std::nullopt;
                 }
             }
 
-            return 0;
-        }
-
-        struct WinHttpHandleDeleter {
-            void operator()(HINTERNET h) const {
-                if (h)
-                    ::WinHttpCloseHandle(h);
-            }
-        };
-
-        using SafeHandle = std::unique_ptr<void, WinHttpHandleDeleter>;
-
-        static std::string GetLatestVersion() {
-            const SafeHandle hSession(::WinHttpOpen(kAgent,
-                                                    WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                                                    WINHTTP_NO_PROXY_NAME,
-                                                    WINHTTP_NO_PROXY_BYPASS,
-                                                    0));
-            if (!hSession)
-                return "";
-
-            const SafeHandle hConn(::WinHttpConnect(hSession.get(), kApiEndpoint, INTERNET_DEFAULT_HTTPS_PORT, 0));
-            if (!hConn)
-                return "";
-
-            const SafeHandle hReq(::WinHttpOpenRequest(hConn.get(),
-                                                       L"GET",
-                                                       kRepoStub,
-                                                       NULL,
-                                                       WINHTTP_NO_REFERER,
-                                                       WINHTTP_DEFAULT_ACCEPT_TYPES,
-                                                       WINHTTP_FLAG_SECURE));
-            if (!hReq)
-                return "";
-
-            const auto headers = L"User-Agent: K8-LRT/1.0\r\n";
-            ::WinHttpAddRequestHeaders(hReq.get(), headers, -1L, WINHTTP_ADDREQ_FLAG_ADD);
-
-            if (!::WinHttpSendRequest(hReq.get(), WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
-                !::WinHttpReceiveResponse(hReq.get(), NULL)) {
-                return "";
-            }
-
-            DWORD statusCode     = 0;
-            DWORD statusCodeSize = sizeof(statusCode);
-            ::WinHttpQueryHeaders(hReq.get(),
-                                  WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                                  NULL,
-                                  &statusCode,
-                                  &statusCodeSize,
-                                  NULL);
-
-            if (statusCode != 200)
-                return "";
-
-            std::string respData;
-            DWORD bytesAvail = 0;
-            while (::WinHttpQueryDataAvailable(hReq.get(), &bytesAvail) && bytesAvail > 0) {
-                std::vector<char> buffer(bytesAvail);
-                DWORD bytes_read = 0;
-
-                if (::WinHttpReadData(hReq.get(), buffer.data(), bytesAvail, &bytes_read)) {
-                    respData.append(buffer.data(), bytes_read);
-                } else {
-                    break;
+            const x::XMLElement* content = root->FirstChildElement("adg:Content");
+            if (!content) {
+                content = root->FirstChildElement("Content");
+                if (!content) {
+                    _Error("Content element not found in XML: %s", xmlPath.string().c_str());
+                    return std::nullopt;
                 }
             }
 
-            return ExtractTagName(respData);
+            const char* snpid = content->Attribute("SNPID");
+            if (!snpid) {
+                _Error("SNPID attribute not found in XML: %s", xmlPath.string().c_str());
+                return std::nullopt;
+            }
+
+            const char* name = content->Attribute("name");
+
+            return LibraryXMLInfo {snpid, name ? name : ""};
         }
-    };
+
+        static std::optional<LibraryXMLInfo> FindLibraryInXML(const fs::path& xmlPath, const std::string& libraryName) {
+            namespace x = tinyxml2;
+
+            x::XMLDocument doc;
+            if (doc.LoadFile(xmlPath.string().c_str()) != x::XML_SUCCESS) {
+                _Error("Failed to load XML file: %s", xmlPath.string().c_str());
+                return std::nullopt;
+            }
+
+            x::XMLElement* root = doc.FirstChildElement("adg:NativeAccess");
+            if (!root) {
+                root = doc.FirstChildElement("NativeAccess");
+                if (!root) {
+                    _Error("Root element not found in XML: %s", xmlPath.string().c_str());
+                    return std::nullopt;
+                }
+            }
+
+            x::XMLElement* installedContent = root->FirstChildElement("adg:InstalledContent");
+            if (!installedContent) {
+                installedContent = root->FirstChildElement("InstalledContent");
+                if (!installedContent) {
+                    _Error("InstalledContent element not found in XML: %s", xmlPath.string().c_str());
+                    return std::nullopt;
+                }
+            }
+
+            for (x::XMLElement* content = installedContent->FirstChildElement("adg:Content"); content != nullptr;
+                 content                = content->NextSiblingElement("adg:Content")) {
+                const char* name = content->Attribute("name");
+                if (name && std::string(name) == libraryName) {
+                    const char* snpid = content->Attribute("SNPID");
+                    if (!snpid) {
+                        _Error("SNPID attribute not found in XML: %s", xmlPath.string().c_str());
+                        return std::nullopt;
+                    }
+                    return LibraryXMLInfo {snpid, name};
+                }
+            }
+
+            for (x::XMLElement* content = installedContent->FirstChildElement("Content"); content != nullptr;
+                 content                = content->NextSiblingElement("Content")) {
+                const char* name = content->Attribute("name");
+                if (name && std::string(name) == libraryName) {
+                    const char* snpid = content->Attribute("SNPID");
+                    if (!snpid) {
+                        _Error("SNPID attribute not found in XML: %s", xmlPath.string().c_str());
+                        return std::nullopt;
+                    }
+                    return LibraryXMLInfo {snpid, name};
+                }
+            }
+
+            _Warn("Library '%s' not found in %s", libraryName.c_str(), xmlPath.string().c_str());
+            return std::nullopt;
+        }
+    }  // namespace XML
 
 #pragma endregion
 
 #pragma region Registry
 
-    class Registry {
-    public:
-        static constexpr auto kPrimaryRoot   = R"(SOFTWARE\Native Instruments)";
-        static constexpr auto kSecondaryRoot = R"(SOFTWARE\WOW6432Node\Native Instruments)";
-
-        static bool EnableBackupPrivileges() {
-            HANDLE hToken;
-            TOKEN_PRIVILEGES tp;
-            LUID luid;
-
-            if (::OpenProcessToken(::GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken)) {
-                if (::LookupPrivilegeValue(nullptr, SE_BACKUP_NAME, &luid)) {
-                    tp.PrivilegeCount           = 1;
-                    tp.Privileges[0].Luid       = luid;
-                    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-                    ::AdjustTokenPrivileges(hToken, FALSE, &tp, sizeof(TOKEN_PRIVILEGES), nullptr, nullptr);
-                }
-
-                ::CloseHandle(hToken);
-                _INFO("Enabled registry backup privileges.");
-
-                return true;
-            }
-
-            _ERROR("Failed to enable registry backup privileges. Make sure you're running K8Tool as Admin.");
-            return false;
-        }
-
-        static bool OpenKey(HKEY* key, HKEY base, const std::string& path, UINT sam) {
-            const LONG result = ::RegOpenKeyExA(base, path.c_str(), 0, (REGSAM)sam, key);
-            if (result != ERROR_SUCCESS) {
-                _WARN("Failed to open registry key: %s", path.c_str());
-                return false;
-            }
-            return true;
-        }
-
-        static void CloseKey(HKEY key) {
-            ::RegCloseKey(key);
-        }
-
-        static bool DeleteKey(HKEY base, const char* key) {
-            const LONG result = ::RegDeleteKeyA(base, key);
-            if (result != ERROR_SUCCESS) {
-                _ERROR("Failed to delete registry key: %s", key);
-                return false;
-            }
-
-            _INFO("Deleted registry key: %s", key);
-            return true;
-        }
-
-        static std::vector<std::string> EnumerateKeys(HKEY key, const char* base) {
-            std::vector<std::string> keys;
-
-            char current[MAX_PATH];
-            DWORD bufferSize = sizeof(current);
-            FILETIME ftLast;
-            DWORD index = 0;
-
-            while (::RegEnumKeyExA(key, index, current, &bufferSize, nullptr, nullptr, nullptr, &ftLast) ==
-                   ERROR_SUCCESS) {
-                bufferSize = sizeof(current);
-                keys.push_back(std::format("{}\\{}", base, current));
-                index++;
-            }
-
-            return keys;
-        }
-
-        static bool GetStrValue(HKEY key, const char* valueName, std::string& strValue) {
-            char value[MAX_PATH];
-            DWORD bufferSize = sizeof(value);
-            DWORD valueType;
-
-            const LSTATUS status = ::RegQueryValueExA(key, valueName, nullptr, &valueType, (LPBYTE)value, &bufferSize);
-            if (status == ERROR_SUCCESS && valueType == REG_SZ) {
-                strValue = value;
-                return true;
-            }
-
-            return false;
-        }
-
-        static bool SetStrValue(HKEY key, const char* valueName, const char* newValue) {
-            const LSTATUS status =
-              ::RegSetValueExA(key, valueName, 0, REG_SZ, (const BYTE*)newValue, (DWORD)(strlen(newValue) + 1));
-            return (status == ERROR_SUCCESS);
-        }
-    };
-
-#pragma endregion
-
-#pragma region Libraries
-    using Library = std::pair<std::string, std::string>;
-
-    class LibraryManager {
-        // Name : ContentDir
-        using LibraryMap      = std::unordered_map<std::string, std::string>;
-        LibraryMap _libraries = {};
-
-        static constexpr std::array kExclusionList = {
+    namespace Registry {
+        static constexpr std::array kKeyExclusionList = {
           "Massive",
           "Massive X",
           "Reaktor 6",
@@ -652,119 +555,562 @@ namespace K8 {
           "RC 48",
         };
 
-    public:
-        LibraryManager() = default;
+        static bool EnableBackupPrivileges() {
+            HANDLE hToken;
+            TOKEN_PRIVILEGES tp;
+            LUID luid;
 
-        void Scan(HWND listView, bool showDlg = false) {
-            Reset(listView);
-
-            HKEY keyPrimary;
-            HKEY keySecondary;
-
-            std::vector<std::string> keys;
-            std::vector<std::string> keysSecondary;
-
-            bool opened = Registry::OpenKey(&keyPrimary, HKEY_LOCAL_MACHINE, Registry::kPrimaryRoot, KEY_READ);
-            if (opened) {
-                keys = Registry::EnumerateKeys(keyPrimary, Registry::kPrimaryRoot);
-                Registry::CloseKey(keyPrimary);
-            }
-
-            opened = Registry::OpenKey(&keySecondary, HKEY_LOCAL_MACHINE, Registry::kSecondaryRoot, KEY_READ);
-            if (opened) {
-                keysSecondary = Registry::EnumerateKeys(keySecondary, Registry::kSecondaryRoot);
-                Registry::CloseKey(keySecondary);
-            }
-
-            if (!keysSecondary.empty()) {
-                std::ranges::move(keysSecondary, std::back_inserter(keys));
-            }
-
-            for (const auto& path : keys) {
-                std::string name;
-                const auto last_slash_pos = path.rfind('\\');
-                if (last_slash_pos != std::string::npos) {
-                    name = path.substr(last_slash_pos + 1);
+            if (::OpenProcessToken(::GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken)) {
+                if (::LookupPrivilegeValue(nullptr, SE_BACKUP_NAME, &luid)) {
+                    tp.PrivilegeCount           = 1;
+                    tp.Privileges[0].Luid       = luid;
+                    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+                    ::AdjustTokenPrivileges(hToken, FALSE, &tp, sizeof(TOKEN_PRIVILEGES), nullptr, nullptr);
                 }
 
-                const bool excluded = std::ranges::find(kExclusionList, name) != kExclusionList.end();
-                if (excluded)
-                    continue;
+                ::CloseHandle(hToken);
+                _Info("Enabled registry backup privileges.");
 
-                HKEY subkey;
-                opened = Registry::OpenKey(&subkey, HKEY_LOCAL_MACHINE, path.data(), KEY_READ);
-                if (!opened)
-                    continue;
+                return true;
+            }
 
-                std::pair<std::string, std::string> library;
-                library.first = name;
-                Registry::GetStrValue(subkey, "ContentDir", library.second);
-                if (library.second.empty()) {
-                    _WARN("Failed to retrieve ContentDir value for registry key: %s", path.c_str());
+            _Error("Failed to enable registry backup privileges. Make sure you're running K8Tool as Admin.");
+            return false;
+        }
+
+        static void QueryLibraries(HKEY hKey, const std::string& subKey, StringPool& pool, LibraryList& libraries) {
+            HKEY hSubKey;
+            if (::RegOpenKeyExA(hKey, subKey.c_str(), 0, KEY_READ, &hSubKey) != ERROR_SUCCESS) {
+                return;
+            }
+
+            DWORD index = 0;
+            char name[256];
+            DWORD nameSize = sizeof(name);
+
+            while (::RegEnumKeyExA(hSubKey, index, name, &nameSize, nullptr, nullptr, nullptr, nullptr) ==
+                   ERROR_SUCCESS) {
+                const auto excluded =
+                  std::ranges::find(kKeyExclusionList, std::string(name)) != kKeyExclusionList.end();
+                if (!excluded) {
+                    std::string libraryKeyPath = subKey + "\\" + name;
+                    HKEY hLibraryKey;
+
+                    if (::RegOpenKeyExA(hKey, libraryKeyPath.c_str(), 0, KEY_READ, &hLibraryKey) == ERROR_SUCCESS) {
+                        char contentDir[512];
+                        DWORD contentDirSize = sizeof(contentDir);
+                        DWORD type;
+
+                        if (::RegQueryValueExA(hLibraryKey,
+                                               "ContentDir",
+                                               nullptr,
+                                               &type,
+                                               (LPBYTE)contentDir,
+                                               &contentDirSize) == ERROR_SUCCESS &&
+                            type == REG_SZ) {
+                            LibraryInfo info;
+                            info.name         = pool.Intern(name);
+                            info.contentDir   = pool.Intern(contentDir);
+                            info.registryRoot = hKey;
+                            info.subKey       = pool.Intern(libraryKeyPath);
+
+                            libraries.push_back(info);
+                        }
+
+                        ::RegCloseKey(hLibraryKey);
+                    }
                 }
-                Registry::CloseKey(subkey);
 
-                _libraries.insert_or_assign(library.first, library.second);
-
-                // Insert into ListView
-                LVITEM lvi  = {0};
-                lvi.mask    = LVIF_TEXT;
-                lvi.iItem   = 0;
-                lvi.pszText = (char*)library.first.c_str();
-
-                int index = ListView_InsertItem(listView, &lvi);
-                ListView_SetItemText(listView, index, 1, (char*)library.second.c_str());
+                nameSize = sizeof(name);
+                ++index;
             }
 
-            _INFO("Scan completed successfully. Found %d libraries.", (int)_libraries.size());
+            ::RegCloseKey(hSubKey);
+        }
 
-            if (showDlg) {
-                ::MessageBox(
-                  nullptr,
-                  std::format("Scan completed successfully.\n\nLibraries found: {}", _libraries.size()).c_str(),
-                  "K8Tool",
-                  MB_OK | MB_ICONINFORMATION);
+        static bool DeleteKey(HKEY hKey, const char* subKey) {
+            const LONG result = ::RegDeleteTreeA(hKey, subKey);
+            if (result != ERROR_SUCCESS) {
+                _Error("Failed to delete registry key: %s (Error: %ld)", subKey, result);
+                return false;
             }
+            _Info("Deleted registry key: %s", subKey);
+            return true;
         }
 
-        void Reset(HWND listView) {
-            _libraries.clear();
-            if (!ListView_DeleteAllItems(listView)) {
-                _ERROR("Failed to clear ListView items.");
+        static bool SetContentDir(HKEY hKey, const char* subKey, const char* newPath) {
+            HKEY hSubKey;
+            if (::RegOpenKeyExA(hKey, subKey, 0, KEY_SET_VALUE, &hSubKey) != ERROR_SUCCESS) {
+                _Error("Failed to open registry key for writing: %s", subKey);
+                return false;
             }
+
+            const LONG result =
+              ::RegSetValueExA(hSubKey, "ContentDir", 0, REG_SZ, (const BYTE*)newPath, (DWORD)strlen(newPath) + 1);
+            ::RegCloseKey(hSubKey);
+
+            if (result != ERROR_SUCCESS) {
+                _Error("Failed to set ContentDir value for key: %s", subKey);
+                return false;
+            }
+
+            _Info("Updated ContentDir for %s -> %s", subKey, newPath);
+            return true;
         }
 
-        bool Contains(const std::string& libraryName) const {
-            return _libraries.contains(libraryName);
-        }
+        static bool BackupKey(HKEY hKey, const char* subKey, const fs::path& backupPath) {
+            HKEY hSubKey;
+            if (::RegOpenKeyExA(hKey, subKey, 0, KEY_READ, &hSubKey) != ERROR_SUCCESS) {
+                _Error("Failed to open registry key for backup: %s", subKey);
+                return false;
+            }
 
-        const std::string& GetContentDir(const std::string& libraryName) {
-            return _libraries.at(libraryName);
-        }
+            std::error_code ec;
+            fs::create_directories(backupPath.parent_path(), ec);
 
-        const LibraryMap& GetLibraries() const {
-            return _libraries;
-        }
+            const auto wBackupPath = Util::ToWideStr(backupPath.string());
+            const LONG result      = ::RegSaveKeyW(hSubKey, wBackupPath.c_str(), nullptr);
+            ::RegCloseKey(hSubKey);
 
-        Library GetLibrary(const std::string& libraryName) {
-            return std::make_pair(libraryName, _libraries.at(libraryName));
-        }
+            if (result != ERROR_SUCCESS) {
+                _Error("Failed to backup registry key: %s to %s (Error: %ld)",
+                       subKey,
+                       backupPath.string().c_str(),
+                       result);
+                return false;
+            }
 
-        size_t Count() const {
-            return _libraries.size();
+            _Info("Backed up registry key: %s -> %s", subKey, backupPath.string().c_str());
+            return true;
         }
-    };
+    };  // namespace Registry
 
 #pragma endregion
 
-#pragma region Dialogs
+#pragma region FileOperations
+
+    namespace FileOps {
+        static bool PerformOperation(IFileOperation* pfo) {
+            if (!pfo)
+                return false;
+
+            const HRESULT hr = pfo->PerformOperations();
+            if (FAILED(hr)) {
+                _Error("IFileOperation::PerformOperations failed (HRESULT: 0x%08X)", hr);
+                return false;
+            }
+
+            BOOL anyAborted = FALSE;
+            pfo->GetAnyOperationsAborted(&anyAborted);
+
+            return !anyAborted;
+        }
+
+        static bool DeleteItem(const fs::path& path) {
+            if (!Util::PathExists(path)) {
+                _Warn("Path does not exist, skipping delete: %s", path.string().c_str());
+                return true;
+            }
+
+            IFileOperation* pfo = nullptr;
+            HRESULT hr          = ::CoCreateInstance(CLSID_FileOperation, nullptr, CLSCTX_ALL, IID_PPV_ARGS(&pfo));
+            if (FAILED(hr)) {
+                _Error("Failed to create IFileOperation instance (HRESULT: 0x%08X)", hr);
+                return false;
+            }
+
+            hr = pfo->SetOperationFlags(FOF_NO_UI | FOF_NOCONFIRMATION);
+            if (FAILED(hr)) {
+                _Error("Failed to set operation flags (HRESULT: 0x%08X)", hr);
+                pfo->Release();
+                return false;
+            }
+
+            IShellItem* pItem = nullptr;
+            const auto wPath  = Util::ToWideStr(path.string());
+            hr                = ::SHCreateItemFromParsingName(wPath.c_str(), nullptr, IID_PPV_ARGS(&pItem));
+            if (FAILED(hr)) {
+                _Error("Failed to create shell item from path: %s (HRESULT: 0x%08X)", path.string().c_str(), hr);
+                pfo->Release();
+                return false;
+            }
+
+            hr = pfo->DeleteItem(pItem, nullptr);
+            pItem->Release();
+
+            if (FAILED(hr)) {
+                _Error("Failed to queue delete operation for: %s (HRESULT: 0x%08X)", path.string().c_str(), hr);
+                pfo->Release();
+                return false;
+            }
+
+            const bool success = PerformOperation(pfo);
+            pfo->Release();
+
+            if (success) {
+                _Info("Deleted: %s", path.string().c_str());
+            } else {
+                _Error("Failed to delete: %s", path.string().c_str());
+            }
+
+            return success;
+        }
+
+        static bool MoveItem(const fs::path& source, const fs::path& destination) {
+            if (!Util::PathExists(source)) {
+                _Error("Source path does not exist: %s", source.string().c_str());
+                return false;
+            }
+
+            std::error_code ec;
+            fs::create_directories(destination.parent_path(), ec);
+            if (ec) {
+                _Error("Failed to create destination directory: %s", destination.parent_path().string().c_str());
+                return false;
+            }
+
+            IFileOperation* pfo = nullptr;
+            HRESULT hr          = ::CoCreateInstance(CLSID_FileOperation, nullptr, CLSCTX_ALL, IID_PPV_ARGS(&pfo));
+            if (FAILED(hr)) {
+                _Error("Failed to create IFileOperation instance (HRESULT: 0x%08X)", hr);
+                return false;
+            }
+
+            hr = pfo->SetOperationFlags(FOF_NO_UI | FOF_NOCONFIRMATION);
+            if (FAILED(hr)) {
+                _Error("Failed to set operation flags (HRESULT: 0x%08X)", hr);
+                pfo->Release();
+                return false;
+            }
+
+            IShellItem* pSource = nullptr;
+            const auto wSource  = Util::ToWideStr(source.string());
+            hr                  = ::SHCreateItemFromParsingName(wSource.c_str(), nullptr, IID_PPV_ARGS(&pSource));
+            if (FAILED(hr)) {
+                _Error("Failed to create shell item from source: %s (HRESULT: 0x%08X)", source.string().c_str(), hr);
+                pfo->Release();
+                return false;
+            }
+
+            IShellItem* pDest = nullptr;
+            const auto wDest  = Util::ToWideStr(destination.parent_path().string());
+            hr                = ::SHCreateItemFromParsingName(wDest.c_str(), nullptr, IID_PPV_ARGS(&pDest));
+            if (FAILED(hr)) {
+                _Error("Failed to create shell item from destination: %s (HRESULT: 0x%08X)",
+                       destination.parent_path().string().c_str(),
+                       hr);
+                pSource->Release();
+                pfo->Release();
+                return false;
+            }
+
+            const auto destFilename = Util::ToWideStr(destination.filename().string());
+            hr                      = pfo->MoveItem(pSource, pDest, destFilename.c_str(), nullptr);
+            pSource->Release();
+            pDest->Release();
+
+            if (FAILED(hr)) {
+                _Error("Failed to queue move operation (HRESULT: 0x%08X)", hr);
+                pfo->Release();
+                return false;
+            }
+
+            const bool success = PerformOperation(pfo);
+            pfo->Release();
+
+            if (success) {
+                _Info("Moved: %s -> %s", source.string().c_str(), destination.string().c_str());
+            } else {
+                _Error("Failed to move: %s -> %s", source.string().c_str(), destination.string().c_str());
+            }
+
+            return success;
+        }
+
+        static bool CopyItem(const fs::path& source, const fs::path& destination) {
+            if (!Util::PathExists(source)) {
+                _Error("Source path does not exist: %s", source.string().c_str());
+                return false;
+            }
+
+            std::error_code ec;
+            fs::create_directories(destination.parent_path(), ec);
+            if (ec) {
+                _Error("Failed to create destination directory: %s", destination.parent_path().string().c_str());
+                return false;
+            }
+
+            IFileOperation* pfo = nullptr;
+            HRESULT hr          = ::CoCreateInstance(CLSID_FileOperation, nullptr, CLSCTX_ALL, IID_PPV_ARGS(&pfo));
+            if (FAILED(hr)) {
+                _Error("Failed to create IFileOperation instance (HRESULT: 0x%08X)", hr);
+                return false;
+            }
+
+            hr = pfo->SetOperationFlags(FOF_NO_UI | FOF_NOCONFIRMATION);
+            if (FAILED(hr)) {
+                _Error("Failed to set operation flags (HRESULT: 0x%08X)", hr);
+                pfo->Release();
+                return false;
+            }
+
+            IShellItem* pSource = nullptr;
+            const auto wSource  = Util::ToWideStr(source.string());
+            hr                  = ::SHCreateItemFromParsingName(wSource.c_str(), nullptr, IID_PPV_ARGS(&pSource));
+            if (FAILED(hr)) {
+                _Error("Failed to create shell item from source: %s (HRESULT: 0x%08X)", source.string().c_str(), hr);
+                pfo->Release();
+                return false;
+            }
+
+            IShellItem* pDest = nullptr;
+            const auto wDest  = Util::ToWideStr(destination.parent_path().string());
+            hr                = ::SHCreateItemFromParsingName(wDest.c_str(), nullptr, IID_PPV_ARGS(&pDest));
+            if (FAILED(hr)) {
+                _Error("Failed to create shell item from destination: %s (HRESULT: 0x%08X)",
+                       destination.parent_path().string().c_str(),
+                       hr);
+                pSource->Release();
+                pfo->Release();
+                return false;
+            }
+
+            const auto destFilename = Util::ToWideStr(destination.filename().string());
+            hr                      = pfo->CopyItem(pSource, pDest, destFilename.c_str(), nullptr);
+            pSource->Release();
+            pDest->Release();
+
+            if (FAILED(hr)) {
+                _Error("Failed to queue copy operation (HRESULT: 0x%08X)", hr);
+                pfo->Release();
+                return false;
+            }
+
+            const bool success = PerformOperation(pfo);
+            pfo->Release();
+
+            if (success) {
+                _Info("Copied: %s -> %s", source.string().c_str(), destination.string().c_str());
+            } else {
+                _Error("Failed to copy: %s -> %s", source.string().c_str(), destination.string().c_str());
+            }
+
+            return success;
+        }
+    }  // namespace FileOps
+
+#pragma endregion
+
+#pragma region UpdateChecking
+
+    namespace Update {
+        static constexpr auto kUpdateURL        = L"api.github.com";
+        static constexpr auto kUpdatePath       = L"/repos/jakerieger/K8-LRT/releases/latest";
+        static constexpr int kResultUpToDate    = 0;
+        static constexpr int kResultNewer       = 1;
+        static constexpr int kResultFuture      = 2;
+        static constexpr int kResultCheckFailed = -1;
+        static constexpr auto kLatestReleaseUrl = "https://github.com/jakerieger/K8-LRT/releases/latest";
+
+        struct CheckResult {
+            int result;
+            char currentVersion[32];
+        };
+
+        struct Version {
+            int major;
+            int minor;
+            int patch;
+
+            static Version Parse(const std::string& str) {
+                Version v {0, 0, 0};
+                if (sscanf_s(str.c_str(), "v%d.%d.%d", &v.major, &v.minor, &v.patch) != 3) {
+                    sscanf_s(str.c_str(), "%d.%d.%d", &v.major, &v.minor, &v.patch);
+                }
+                return v;
+            }
+
+            int Compare(const Version& other) const {
+                if (major != other.major)
+                    return major - other.major;
+                if (minor != other.minor)
+                    return minor - other.minor;
+                return patch - other.patch;
+            }
+        };
+
+        static std::string FetchLatestVersion() {
+            HINTERNET hSession = nullptr;
+            HINTERNET hConnect = nullptr;
+            HINTERNET hRequest = nullptr;
+            std::string result;
+
+            hSession = ::WinHttpOpen(L"K8Tool/1.0",
+                                     WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                     WINHTTP_NO_PROXY_NAME,
+                                     WINHTTP_NO_PROXY_BYPASS,
+                                     0);
+
+            if (!hSession) {
+                _Error("WinHttpOpen failed");
+                return result;
+            }
+
+            hConnect = ::WinHttpConnect(hSession, kUpdateURL, INTERNET_DEFAULT_HTTPS_PORT, 0);
+            if (!hConnect) {
+                _Error("WinHttpConnect failed");
+                ::WinHttpCloseHandle(hSession);
+                return result;
+            }
+
+            hRequest = ::WinHttpOpenRequest(hConnect,
+                                            L"GET",
+                                            kUpdatePath,
+                                            nullptr,
+                                            WINHTTP_NO_REFERER,
+                                            WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                            WINHTTP_FLAG_SECURE);
+
+            if (!hRequest) {
+                _Error("WinHttpOpenRequest failed");
+                ::WinHttpCloseHandle(hConnect);
+                ::WinHttpCloseHandle(hSession);
+                return result;
+            }
+
+            const wchar_t* headers = L"User-Agent: K8Tool\r\n";
+            if (!::WinHttpSendRequest(hRequest, headers, -1, WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
+                _Error("WinHttpSendRequest failed");
+                ::WinHttpCloseHandle(hRequest);
+                ::WinHttpCloseHandle(hConnect);
+                ::WinHttpCloseHandle(hSession);
+                return result;
+            }
+
+            if (!::WinHttpReceiveResponse(hRequest, nullptr)) {
+                _Error("WinHttpReceiveResponse failed");
+                ::WinHttpCloseHandle(hRequest);
+                ::WinHttpCloseHandle(hConnect);
+                ::WinHttpCloseHandle(hSession);
+                return result;
+            }
+
+            DWORD statusCode     = 0;
+            DWORD statusCodeSize = sizeof(statusCode);
+            ::WinHttpQueryHeaders(hRequest,
+                                  WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                                  nullptr,
+                                  &statusCode,
+                                  &statusCodeSize,
+                                  nullptr);
+
+            if (statusCode != 200) {
+                _Error("HTTP request failed with status code: %lu", statusCode);
+                ::WinHttpCloseHandle(hRequest);
+                ::WinHttpCloseHandle(hConnect);
+                ::WinHttpCloseHandle(hSession);
+                return result;
+            }
+
+            DWORD bytesAvailable = 0;
+            std::vector<char> buffer;
+
+            while (::WinHttpQueryDataAvailable(hRequest, &bytesAvailable) && bytesAvailable > 0) {
+                std::vector<char> chunk(bytesAvailable + 1);
+                DWORD bytesRead = 0;
+
+                if (::WinHttpReadData(hRequest, chunk.data(), bytesAvailable, &bytesRead)) {
+                    buffer.insert(buffer.end(), chunk.begin(), chunk.begin() + bytesRead);
+                }
+            }
+
+            if (!buffer.empty()) {
+                result = std::string(buffer.begin(), buffer.end());
+            }
+
+            ::WinHttpCloseHandle(hRequest);
+            ::WinHttpCloseHandle(hConnect);
+            ::WinHttpCloseHandle(hSession);
+
+            return result;
+        }
+
+        static std::string ParseTagName(const std::string& json) {
+            const auto tagPos = json.find("\"tag_name\"");
+            if (tagPos == std::string::npos)
+                return {};
+
+            const auto colonPos = json.find(':', tagPos);
+            if (colonPos == std::string::npos)
+                return {};
+
+            const auto quoteStart = json.find('"', colonPos);
+            if (quoteStart == std::string::npos)
+                return {};
+
+            const auto quoteEnd = json.find('"', quoteStart + 1);
+            if (quoteEnd == std::string::npos)
+                return {};
+
+            return json.substr(quoteStart + 1, quoteEnd - quoteStart - 1);
+        }
+
+        static void Check(HWND hwnd) {
+            auto* result   = new CheckResult {};
+            result->result = kResultCheckFailed;
+            strcpy_s(result->currentVersion, "Unknown");
+
+            auto finish = [&](bool error = false) {
+                if (error) {
+                    delete result;
+                    ::PostMessage(hwnd, WM_UPDATE_CHECK_COMPLETED, 0, (LPARAM) nullptr);
+                } else {
+                    ::PostMessage(hwnd, WM_UPDATE_CHECK_COMPLETED, 0, (LPARAM)result);
+                }
+            };
+
+            const std::string json = FetchLatestVersion();
+            if (json.empty()) {
+                _Error("Failed to fetch latest version");
+                return finish(true);
+            }
+
+            const std::string latestTag = ParseTagName(json);
+            if (latestTag.empty()) {
+                _Error("Failed to parse tag name from JSON");
+                return finish(true);
+            }
+
+            strcpy_s(result->currentVersion, latestTag.c_str());
+
+            const Version current = Version::Parse(VER_PRODUCTVERSION_STR);
+            const Version latest  = Version::Parse(latestTag);
+
+            const int comparison = current.Compare(latest);
+            if (comparison < 0) {
+                result->result = kResultNewer;
+            } else if (comparison > 0) {
+                result->result = kResultFuture;
+            } else {
+                result->result = kResultUpToDate;
+            }
+
+            return finish();
+        }
+    }  // namespace Update
+
+#pragma endregion
+
+#pragma region Dialog
 
     namespace Dialog {
-        struct RemoveSelectedDialogData {
-            Library library;
-            bool backupRegistry;
-            bool removeContentDir;
-        };
+        namespace Data {
+            struct RemoveSelectedDialogData {
+                LibraryInfo libraryInfo;
+                bool backupRegistry;
+                bool removeContent;
+            };
+        }  // namespace Data
 
         namespace DialogProc {
             static INT_PTR CALLBACK About(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -773,12 +1119,12 @@ namespace K8 {
                         LPNMHDR pnmh = (LPNMHDR)lParam;
                         if (pnmh->idFrom == IDC_REPO_LINK && (pnmh->code == NM_CLICK || pnmh->code == NM_RETURN)) {
                             PNMLINK pnmLink = (PNMLINK)lParam;
-                            ShellExecuteW(nullptr,
-                                          L"open",
-                                          L"https://github.com/jakerieger/K8-LRT",
-                                          nullptr,
-                                          nullptr,
-                                          SW_SHOWNORMAL);
+                            ::ShellExecuteW(nullptr,
+                                            L"open",
+                                            L"https://github.com/jakerieger/K8-LRT",
+                                            nullptr,
+                                            nullptr,
+                                            SW_SHOWNORMAL);
                             return (INT_PTR)TRUE;
                         }
                         break;
@@ -787,8 +1133,8 @@ namespace K8 {
                     case WM_INITDIALOG: {
                         auto latest_v = (char*)lParam;
                         if (latest_v) {
-                            SetDlgItemTextA(hwnd, IDC_VER_LABEL, std::format("Version {}", latest_v).c_str());
-                            SetDlgItemTextA(hwnd, IDC_BUILD_LABEL, std::format("Build {}", VER_BUILD).c_str());
+                            ::SetDlgItemTextA(hwnd, IDC_VER_LABEL, std::format("Version {}", latest_v).c_str());
+                            ::SetDlgItemTextA(hwnd, IDC_BUILD_LABEL, std::format("Build {}", VER_BUILD).c_str());
                         }
 
                         return (INT_PTR)TRUE;
@@ -796,12 +1142,12 @@ namespace K8 {
 
                     case WM_COMMAND:
                         if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL) {
-                            EndDialog(hwnd, LOWORD(wParam));
+                            ::EndDialog(hwnd, LOWORD(wParam));
                             return (INT_PTR)TRUE;
                         }
 
                         if (LOWORD(wParam) == IDC_CHECK_UPDATES_BUTTON) {
-                            std::thread(Update::CheckForUpdates, ::GetParent(hwnd)).detach();
+                            std::thread(Update::Check, ::GetParent(hwnd)).detach();
                         }
 
                         break;
@@ -813,7 +1159,7 @@ namespace K8 {
             static INT_PTR CALLBACK LogViewer(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 switch (msg) {
                     case WM_INITDIALOG: {
-                        const auto contents = g_Logger.GetLogContents();
+                        const auto contents = logger->GetLogContents();
                         if (contents.empty()) {
                             ::MessageBox(hwnd,
                                          "Failed to retrieve contents of log file.",
@@ -822,7 +1168,7 @@ namespace K8 {
                             return (INT_PTR)FALSE;
                         }
 
-                        const auto logContents = Utils::LF_To_CRLF(contents);
+                        const auto logContents = Util::ToCRLF(contents);
                         const HWND logViewer   = ::GetDlgItem(hwnd, IDC_LOGVIEW_EDIT);
                         ::SetWindowText(logViewer, logContents.c_str());
                         const auto textLength = ::GetWindowTextLength(logViewer);
@@ -853,19 +1199,44 @@ namespace K8 {
                 return (INT_PTR)FALSE;
             }
 
+            static INT_PTR CALLBACK Progress(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+                switch (msg) {
+                    case WM_INITDIALOG: {
+                        HWND hProgress = ::GetDlgItem(hwnd, IDC_PROGRESS_BAR);
+                        ::SendMessage(hProgress, PBM_SETMARQUEE, TRUE, 30);
+                        return (INT_PTR)TRUE;
+                    }
+
+                    case WM_UPDATE_PROGRESS_TEXT: {
+                        auto* text = (const char*)lParam;
+                        if (text) {
+                            ::SetDlgItemText(hwnd, IDC_PROGRESS_TEXT, text);
+                            delete[] text;
+                            return (INT_PTR)TRUE;
+                        }
+                        return (INT_PTR)FALSE;
+                    }
+
+                    case WM_CLOSE:
+                        return (INT_PTR)TRUE;  // Block user from closing
+                }
+
+                return (INT_PTR)FALSE;
+            }
+
             static INT_PTR CALLBACK Remove(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 return (INT_PTR)FALSE;
             }
 
             static INT_PTR CALLBACK RemoveSelected(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-                static RemoveSelectedDialogData* data = nullptr;
+                static Data::RemoveSelectedDialogData* data = nullptr;
 
                 switch (msg) {
                     case WM_INITDIALOG: {
-                        data = (RemoveSelectedDialogData*)lParam;
+                        data = (Data::RemoveSelectedDialogData*)lParam;
 
                         const auto hNameLabel = ::GetDlgItem(hwnd, IDC_REMOVE_SELECTED_NAME);
-                        ::SetWindowText(hNameLabel, data->library.first.c_str());
+                        ::SetWindowText(hNameLabel, data->libraryInfo.name);
 
                         HFONT hFont = CreateFont(16,
                                                  0,
@@ -884,14 +1255,14 @@ namespace K8 {
                         ::SendMessage(hNameLabel, WM_SETFONT, (WPARAM)hFont, TRUE);
 
                         const HWND hContentDirLabel = ::GetDlgItem(hwnd, IDC_REMOVE_SELECTED_CONTENT_DIR);
-                        ::SetWindowText(hContentDirLabel, data->library.second.c_str());
+                        ::SetWindowText(hContentDirLabel, data->libraryInfo.contentDir);
 
                         ::CheckDlgButton(hwnd,
                                          IDC_REMOVE_SELECTED_BACKUP_CHECK,
                                          data->backupRegistry ? BST_CHECKED : BST_UNCHECKED);
                         ::CheckDlgButton(hwnd,
                                          IDC_REMOVE_SELECTED_CONTENT_DIR_CHECK,
-                                         data->removeContentDir ? BST_CHECKED : BST_UNCHECKED);
+                                         data->removeContent ? BST_CHECKED : BST_UNCHECKED);
 
                         RECT parentRect, dlgRect;
                         const HWND hParent = ::GetParent(hwnd);
@@ -921,7 +1292,7 @@ namespace K8 {
                             case ID_REMOVE_SELECTED_REMOVE: {
                                 data->backupRegistry =
                                   (::IsDlgButtonChecked(hwnd, IDC_REMOVE_SELECTED_BACKUP_CHECK) == BST_CHECKED);
-                                data->removeContentDir =
+                                data->removeContent =
                                   (::IsDlgButtonChecked(hwnd, IDC_REMOVE_SELECTED_CONTENT_DIR_CHECK) == BST_CHECKED);
 
                                 ::EndDialog(hwnd, ID_REMOVE_SELECTED_REMOVE);
@@ -963,7 +1334,7 @@ namespace K8 {
             return (INT_PTR)FALSE;
         }
 
-        static INT_PTR ShowRemoveSelected(HINSTANCE hInst, HWND hwnd, const RemoveSelectedDialogData* data) {
+        static INT_PTR ShowRemoveSelected(HINSTANCE hInst, HWND hwnd, const Data::RemoveSelectedDialogData* data) {
             const auto result = ::DialogBoxParam(hInst,
                                                  MAKEINTRESOURCE(IDD_REMOVE_SELECTED_BOX),
                                                  hwnd,
@@ -979,56 +1350,21 @@ namespace K8 {
 
 #pragma endregion
 
-#pragma region I/O
+#pragma region LibraryScanner
 
-    namespace IO {
-        std::vector<wchar_t> MakeDoubleNullTerminated(const fs::path& path) {
-            std::wstring pathStr = path.wstring();
-            std::vector<wchar_t> buffer(pathStr.size() + 2, L'\0');
-            std::ranges::copy(pathStr, buffer.begin());
-            return buffer;
+    namespace LibraryScanner {
+        static LibraryList Scan(StringPool& pool) {
+            LibraryList libraries;
+            Registry::QueryLibraries(HKEY_LOCAL_MACHINE, R"(SOFTWARE\Native Instruments)", pool, libraries);
+            Registry::QueryLibraries(HKEY_LOCAL_MACHINE, R"(SOFTWARE\WOW6432Node\Native Instruments)", pool, libraries);
+            _Info("Found %zu libraries", libraries.size());
+            return libraries;
         }
-    }  // namespace IO
-
-    namespace File {
-        static bool Delete(const fs::path& file) {
-            const bool deleted = ::DeleteFile(file.string().c_str());
-            return deleted;
-        }
-
-        static bool Copy(const fs::path& src, const fs::path& dst, bool overwrite = true) {
-            const bool copied = ::CopyFile(src.string().c_str(), dst.string().c_str(), !overwrite);
-            return copied;
-        }
-    }  // namespace File
-
-    namespace Directory {
-        static bool Delete(const fs::path& path) {
-            const auto pFrom = IO::MakeDoubleNullTerminated(path);
-
-            SHFILEOPSTRUCTW fileOp = {};
-            fileOp.wFunc           = FO_DELETE;
-            fileOp.pFrom           = pFrom.data();
-            fileOp.fFlags          = FOF_NO_UI | FOF_NOCONFIRMATION;
-
-            return (::SHFileOperationW(&fileOp) == 0);
-        }
-
-        static bool Copy(const fs::path& src, const fs::path& dst) {
-            const auto pFrom = IO::MakeDoubleNullTerminated(src);
-            const auto pTo   = IO::MakeDoubleNullTerminated(dst);
-
-            SHFILEOPSTRUCTW fileOp = {};
-            fileOp.wFunc           = FO_COPY;
-            fileOp.pFrom           = pFrom.data();
-            fileOp.pTo             = pTo.data();
-            fileOp.fFlags          = FOF_NO_UI;
-
-            return (::SHFileOperationW(&fileOp) == 0);
-        }
-    }  // namespace Directory
+    }  // namespace LibraryScanner
 
 #pragma endregion
+
+#pragma region Threading
 
     namespace Threads {
         struct RemoveSelectedResult {
@@ -1036,168 +1372,198 @@ namespace K8 {
             bool cancelled;
         };
 
-        static void RemoveSelected(HWND hwnd, const Dialog::RemoveSelectedDialogData* data, std::stop_token stoken) {
-            const auto start = std::chrono::high_resolution_clock::now();
+        static void RemoveSelected(HWND hwndOwner,
+                                   HWND hwndProgress,
+                                   const std::string& libraryName,
+                                   const std::string& contentDir,
+                                   HKEY registryRoot,
+                                   const std::string& registrySubKey,
+                                   bool backupRegistry,
+                                   bool deleteContentDir,
+                                   std::stop_token stopToken) {
+            _Info("Starting removal process for library: %s", libraryName.c_str());
 
-            const auto name       = data->library.first.c_str();
-            const auto contentDir = data->library.second.c_str();
+            auto* result      = new RemoveSelectedResult {};
+            result->success   = false;
+            result->cancelled = false;
 
-            auto* result = new RemoveSelectedResult;
-
-            auto finish = [&](bool success, bool cancelled = false) {
-                result->success   = success;
-                result->cancelled = false;
-                ::PostMessage(hwnd, WM_REMOVE_SELECTED_COMPLETED, 0, (LPARAM)result);
-                delete data;
-            };
-
-            auto checkCancelled = [&]() -> bool {
-                if (stoken.stop_requested()) {
-                    finish(false, true);
-                    return true;
-                }
-                return false;
-            };
-
-            // 1. Find SNPID
-            const char* libraryName = nullptr;
-            fs::path xmlFile        = fs::path(Globals::kServiceCenter) / std::format("{}.xml", name);
-            if (!fs::exists(xmlFile)) {
-                xmlFile     = Globals::kNativeAccessXML;
-                libraryName = name;
+            if (stopToken.stop_requested()) {
+                result->cancelled = true;
+                ::PostMessage(hwndOwner, WM_REMOVE_SELECTED_COMPLETED, 0, (LPARAM)result);
+                return;
             }
-            const auto SNPID = Utils::FindSNPID(xmlFile, libraryName);
-            if (SNPID.empty()) {
-                _WARN("Did not find an associated SNPID for library: %s", name);
+
+            // Send progress update
+            {
+                std::string status = "Locating library XML files...";
+                char* statusCopy   = new char[status.size() + 1];
+                strcpy_s(statusCopy, status.size() + 1, status.c_str());
+                ::PostMessage(hwndProgress, WM_UPDATE_PROGRESS_TEXT, 0, (LPARAM)statusCopy);
+                std::this_thread::sleep_for(std::chrono::seconds(2));
+            }
+
+            std::optional<XML::LibraryXMLInfo> xmlInfo;
+            fs::path xmlPath = fs::path(Globals::kServiceCenter) / (libraryName + ".xml");
+            if (Util::FileExists(xmlPath)) {
+                xmlInfo = XML::GetSNPID(xmlPath);
             } else {
-                _INFO("Found SNPID for library: %s (SNPID: %s)", name, SNPID.c_str());
-            }
-            if (checkCancelled())
-                return;
-
-            // 2. Delete .XML file
-            if (xmlFile != fs::path(Globals::kNativeAccessXML)) {
-                if (!File::Delete(xmlFile)) {
-                    _ERROR("Failed to delete XML file: %s", xmlFile.string().c_str());
-                    return finish(false);
+                xmlPath = Globals::kNativeAccessXML;
+                if (Util::FileExists(xmlPath)) {
+                    xmlInfo = XML::FindLibraryInXML(xmlPath, libraryName);
                 }
-                _INFO("Deleted XML manifest: %s", xmlFile.string().c_str());
             }
-            if (checkCancelled())
-                return;
 
-            // 3. Delete .cache file
-            fs::path cacheFileToDelete = {};
-            for (const auto& cacheFile : fs::directory_iterator(Utils::GetLocalAppData() / Globals::kLibrariesCache)) {
-                if (cacheFile.is_regular_file() && cacheFile.path().extension() == ".cache") {
-                    // Check filename
-                    const auto filename  = cacheFile.path().filename().string();
-                    const auto fileSnpid = filename.substr(1, 3);  // Cache file names begin with "K"
-                    if (fileSnpid == SNPID) {
-                        cacheFileToDelete = filename;
-                        break;
+            if (!xmlInfo.has_value()) {
+                _Error("Could not find SNPID for library: %s", libraryName.c_str());
+                ::PostMessage(hwndOwner, WM_REMOVE_SELECTED_COMPLETED, 0, (LPARAM)result);
+                return;
+            }
+
+            if (stopToken.stop_requested()) {
+                result->cancelled = true;
+                ::PostMessage(hwndOwner, WM_REMOVE_SELECTED_COMPLETED, 0, (LPARAM)result);
+                return;
+            }
+
+            // Send progress update
+            {
+                std::string status = "Removing library XML file...";
+                char* statusCopy   = new char[status.size() + 1];
+                strcpy_s(statusCopy, status.size() + 1, status.c_str());
+                ::PostMessage(hwndProgress, WM_UPDATE_PROGRESS_TEXT, 0, (LPARAM)statusCopy);
+                std::this_thread::sleep_for(std::chrono::seconds(2));
+            }
+
+            if (xmlPath.filename() != "NativeAccess.xml") {
+                if (!FileOps::DeleteItem(xmlPath)) {
+                    _Error("Failed to delete XML file: %s", xmlPath.string().c_str());
+                }
+            }
+
+            if (stopToken.stop_requested()) {
+                result->cancelled = true;
+                ::PostMessage(hwndOwner, WM_REMOVE_SELECTED_COMPLETED, 0, (LPARAM)result);
+                return;
+            }
+
+            // Send progress update
+            {
+                std::string status = "Removing cache files...";
+                char* statusCopy   = new char[status.size() + 1];
+                strcpy_s(statusCopy, status.size() + 1, status.c_str());
+                ::PostMessage(hwndProgress, WM_UPDATE_PROGRESS_TEXT, 0, (LPARAM)statusCopy);
+                std::this_thread::sleep_for(std::chrono::seconds(2));
+            }
+
+            const fs::path cacheDir = fs::path(Util::GetLocalAppData()) / Globals::kLibrariesCache;
+            if (Util::PathExists(cacheDir)) {
+                for (const auto& entry : fs::directory_iterator(cacheDir)) {
+                    if (entry.path().filename().string().find("K" + xmlInfo->snpid) != std::string::npos) {
+                        FileOps::DeleteItem(entry.path());
                     }
                 }
             }
 
-            if (fs::exists(cacheFileToDelete)) {
-                if (!File::Delete(cacheFileToDelete)) {
-                    _ERROR("Failed to delete cache: %s", cacheFileToDelete.string().c_str());
-                    return finish(false);
-                }
-
-                _INFO("Deleted library cache file: %s", cacheFileToDelete.string().c_str());
-            }
-            if (checkCancelled())
+            if (stopToken.stop_requested()) {
+                result->cancelled = true;
+                ::PostMessage(hwndOwner, WM_REMOVE_SELECTED_COMPLETED, 0, (LPARAM)result);
                 return;
-
-            // 4. Delete and backup komplete.db3
-            const auto db3Path = Utils::GetLocalAppData() / Globals::kKompleteDB3;
-            if (!fs::exists(db3Path)) {
-                _WARN("komplete.db3 is missing. It may have already been deleted.");
-            } else {
-                if (!File::Copy(db3Path, db3Path.string() + ".bak")) {
-                    _ERROR("Failed to create a backup of komplete.db3");
-                    return finish(false);
-                } else {
-                    _INFO("Created a backup of komplete.db3: %s", (db3Path.string() + ".bak").c_str());
-
-                    if (!File::Delete(db3Path)) {
-                        _ERROR("Failed to delete komplete.db3");
-                        return finish(false);
-                    } else {
-                        _INFO("Deleted komplete.db3: %s", db3Path.string().c_str());
-                    }
-                }
             }
-            if (checkCancelled())
+
+            // Send progress update
+            {
+                std::string status = "Removing database file...";
+                char* statusCopy   = new char[status.size() + 1];
+                strcpy_s(statusCopy, status.size() + 1, status.c_str());
+                ::PostMessage(hwndProgress, WM_UPDATE_PROGRESS_TEXT, 0, (LPARAM)statusCopy);
+                std::this_thread::sleep_for(std::chrono::seconds(2));
+            }
+
+            const fs::path db3Path = fs::path(Util::GetLocalAppData()) / Globals::kKompleteDB3;
+            if (Util::FileExists(db3Path)) {
+                const fs::path backup = db3Path.string() + ".bak";
+                FileOps::CopyItem(db3Path, backup);
+                FileOps::DeleteItem(db3Path);
+            }
+
+            if (stopToken.stop_requested()) {
+                result->cancelled = true;
+                ::PostMessage(hwndOwner, WM_REMOVE_SELECTED_COMPLETED, 0, (LPARAM)result);
                 return;
+            }
 
-            // 5. TODO: Delete .jwt RAS3 auth token
+            // Send progress update
+            {
+                std::string status = "Removing JWT files...";
+                char* statusCopy   = new char[status.size() + 1];
+                strcpy_s(statusCopy, status.size() + 1, status.c_str());
+                ::PostMessage(hwndProgress, WM_UPDATE_PROGRESS_TEXT, 0, (LPARAM)statusCopy);
+                std::this_thread::sleep_for(std::chrono::seconds(2));
+            }
 
-            // 6. Delete registry entry(s)
-            const auto primaryKeyPath   = std::format("{}\\{}", Registry::kPrimaryRoot, name);
-            const auto secondaryKeyPath = std::format("{}\\{}", Registry::kSecondaryRoot, name);
-
-            auto deleteKey = [](const std::string& keyPath, const std::string& libName, bool backup) -> bool {
-                HKEY key;
-                if (Registry::OpenKey(&key, HKEY_LOCAL_MACHINE, keyPath, KEY_ALL_ACCESS)) {
-                    if (backup) {
-                        const auto backupFilename = fs::path("backup") / std::format("{}.reg", libName);
-                        if (fs::exists(backupFilename)) {
-                            if (!File::Delete(backupFilename)) {
-                                _WARN("Failed to delete backup file: %s. Unable to backup registry entry.",
-                                      backupFilename.string().c_str());
-                            }
+            const fs::path ras3Dir = Globals::kRAS3;
+            if (Util::PathExists(ras3Dir)) {
+                for (const auto& entry : fs::directory_iterator(ras3Dir)) {
+                    if (entry.path().extension() == ".jwt") {
+                        if (entry.path().filename().string().find(xmlInfo->snpid) != std::string::npos) {
+                            FileOps::DeleteItem(entry.path());
                         }
-
-                        const auto backedUp =
-                          ::RegSaveKeyExA(key, backupFilename.string().c_str(), nullptr, REG_LATEST_FORMAT) ==
-                          ERROR_SUCCESS;
-                        if (!backedUp) {
-                            _WARN("Failed to backup registry key: %s", backupFilename.string().c_str());
-                        }
                     }
-
-                    Registry::CloseKey(key);
-                    const bool deleted = Registry::DeleteKey(HKEY_LOCAL_MACHINE, keyPath.c_str());
-                    if (!deleted) {
-                        _ERROR("Failed to delete key: %s", keyPath.c_str());
-                        return false;
-                    }
-
-                    _INFO("Deleted registry key: %s", keyPath.c_str());
                 }
-
-                return true;
-            };
-
-            if (!deleteKey(primaryKeyPath, name, data->backupRegistry)) {
-                _ERROR("Failed to delete primary registry key: %s", primaryKeyPath.c_str());
-                return finish(false);
             }
 
-            if (!deleteKey(secondaryKeyPath, name, data->backupRegistry)) {
-                _WARN("Failed to delete secondary registry key: %s. It may not exist.", secondaryKeyPath.c_str());
-            }
-            if (checkCancelled())
+            if (stopToken.stop_requested()) {
+                result->cancelled = true;
+                ::PostMessage(hwndOwner, WM_REMOVE_SELECTED_COMPLETED, 0, (LPARAM)result);
                 return;
-
-            // 7. Delete content directory
-            if (data->removeContentDir) {
-                if (!Directory::Delete(contentDir)) {
-                    _ERROR("Failed to delete content directory: %s", contentDir);
-                    return finish(false);
-                }
-
-                _INFO("Deleted content directory: %s", contentDir);
             }
 
-            const auto end     = std::chrono::high_resolution_clock::now();
-            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-            _INFO("Finished removing library \"%s\" (took %.2f seconds)", name, elapsed.count() / 1000.f);
+            if (deleteContentDir && !contentDir.empty()) {
+                // Send progress update
+                {
+                    std::string status = "Removing content directory (this may take a while)...";
+                    char* statusCopy   = new char[status.size() + 1];
+                    strcpy_s(statusCopy, status.size() + 1, status.c_str());
+                    ::PostMessage(hwndProgress, WM_UPDATE_PROGRESS_TEXT, 0, (LPARAM)statusCopy);
+                    std::this_thread::sleep_for(std::chrono::seconds(2));
+                }
 
-            return finish(true);
+                if (!FileOps::DeleteItem(contentDir)) {
+                    _Error("Failed to delete content directory: %s", contentDir.c_str());
+                }
+            }
+
+            if (stopToken.stop_requested()) {
+                result->cancelled = true;
+                ::PostMessage(hwndOwner, WM_REMOVE_SELECTED_COMPLETED, 0, (LPARAM)result);
+                return;
+            }
+
+            // Send progress update
+            {
+                std::string status = "Removing registry entries...";
+                char* statusCopy   = new char[status.size() + 1];
+                strcpy_s(statusCopy, status.size() + 1, status.c_str());
+                ::PostMessage(hwndProgress, WM_UPDATE_PROGRESS_TEXT, 0, (LPARAM)statusCopy);
+                std::this_thread::sleep_for(std::chrono::seconds(2));
+            }
+
+            if (backupRegistry) {
+                const auto timestamp      = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+                const fs::path backupPath = fs::current_path() / "backup" / std::format("{}.reg", timestamp);
+                if (!Registry::BackupKey(registryRoot, registrySubKey.c_str(), backupPath)) {
+                    _Warn("Failed to backup registry key for library: %s", libraryName.c_str());
+                }
+            }
+
+            if (!Registry::DeleteKey(registryRoot, registrySubKey.c_str())) {
+                _Error("Failed to delete registry key for library: %s", libraryName.c_str());
+                ::PostMessage(hwndOwner, WM_REMOVE_SELECTED_COMPLETED, 0, (LPARAM)result);
+                return;
+            }
+
+            result->success = true;
+            ::PostMessage(hwndOwner, WM_REMOVE_SELECTED_COMPLETED, 0, (LPARAM)result);
         }
     };  // namespace Threads
 
@@ -1213,13 +1579,13 @@ namespace K8 {
     class Application {
         static LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
 
-        HINSTANCE _hInstance;
-        HWND _hwnd;
+        HINSTANCE _hInstance {nullptr};
+        HWND _hwnd {nullptr};
+        HWND _hProgress {nullptr};
         LPCSTR _title;
         UINT _width, _height;
         int _nCmdShow;
         bool _consoleAttached {false};
-        std::jthread _worker {};
 
         // UI Members
         HFONT _font;
@@ -1239,9 +1605,12 @@ namespace K8 {
         static constexpr int kIDC_RescanLibrariesButton  = 106;
 
         // Business-logic members
-        LibraryManager _libManager   = {};
+        LibraryList _libraries       = {};
+        StringPool _strPool          = {};
+        std::string _selectedLibrary = {};
         int _selectedIndex           = -1;
-        std::string _selectedLibrary = "";
+
+        std::jthread _worker {};
 
     public:
         explicit Application(HINSTANCE hInstance, LPCSTR title, UINT width, UINT height, int nCmdShow)
@@ -1258,7 +1627,7 @@ namespace K8 {
             ::UpdateWindow(_hwnd);
 
             // Spawn update check thread
-            std::thread(Update::CheckForUpdates, _hwnd).detach();
+            std::thread(Update::Check, _hwnd).detach();
 
             MSG msg = {0};
             while (::GetMessage(&msg, nullptr, 0, 0)) {
@@ -1266,15 +1635,13 @@ namespace K8 {
                 ::DispatchMessage(&msg);
             }
 
-            return 0;
+            return (int)msg.wParam;
         }
 
     private:
-        void ToggleButtons(bool enabled) const {
-            ::EnableWindow(_rescanLibrariesButton, enabled);
-            ::EnableWindow(_removeButton, enabled);
-            ::EnableWindow(_removeSelectedButton, enabled);
-            ::EnableWindow(_relocateSelectedButton, enabled);
+        void ToggleSelectedButtons(bool enabled) const {
+            ::EnableWindow(_removeSelectedButton, (BOOL)enabled);
+            ::EnableWindow(_relocateSelectedButton, (BOOL)enabled);
         }
 
         void AttachConsole() {
@@ -1293,7 +1660,7 @@ namespace K8 {
                 return;
 
             if (!FreeConsole()) {
-                _ERROR("Unknown error occurred releasing console.");
+                _Error("Unknown error occurred releasing console.");
                 return;
             }
 
@@ -1305,7 +1672,7 @@ namespace K8 {
             AttachConsole();
 #endif
 
-            g_Logger.SetConsoleAttached(_consoleAttached);
+            logger->SetConsoleAttached(_consoleAttached);
 
             if (!Registry::EnableBackupPrivileges()) {
                 throw ApplicationError("Failed to enable registry backup privileges.");
@@ -1362,7 +1729,7 @@ namespace K8 {
             constexpr DWORD use = TRUE;
             hr                  = ::DwmSetWindowAttribute(_hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &use, sizeof(use));
             if (FAILED(hr)) {
-                _WARN("Failed to enable dark mode for title bar.");
+                _Warn("Failed to enable dark mode for title bar.");
             }
         }
 
@@ -1373,29 +1740,59 @@ namespace K8 {
             ::CoUninitialize();
         }
 
-        void RescanAndReset() {
-            if (_worker.joinable()) {
-                const auto resp =
-                  ::MessageBox(_hwnd,
-                               "Cannot perform scan while an operation is in progress. Would you like to terminate it?",
-                               "K8Tool",
-                               MB_YESNO | MB_ICONWARNING);
-                if (resp == IDYES) {
-                    _worker.request_stop();
-                    if (_worker.joinable()) {
-                        _worker.join();
-                    }
-                } else {
-                    return;
-                }
+        void ScanAndPopulate(bool showDlg = false) {
+            _Info("Scanning for libraries...");
+            _libraries = LibraryScanner::Scan(_strPool);
+            ListView_DeleteAllItems(_listView);
+            for (size_t i = 0; i < _libraries.size(); ++i) {
+                LVITEM lvi {};
+                lvi.mask     = LVIF_TEXT;
+                lvi.iItem    = static_cast<int>(i);
+                lvi.iSubItem = 0;
+                lvi.pszText  = const_cast<char*>(_libraries[i].name);
+                ListView_InsertItem(_listView, &lvi);
+
+                ListView_SetItemText(_listView, static_cast<int>(i), 1, const_cast<char*>(_libraries[i].contentDir));
+            }
+            _Info("Populated ListView with %zu libraries", _libraries.size());
+            if (showDlg) {
+                ::MessageBox(
+                  nullptr,
+                  std::format("Scan completed successfully.\n\nLibraries found: {}", _libraries.size()).c_str(),
+                  "K8Tool",
+                  MB_OK | MB_ICONINFORMATION);
+            }
+        }
+
+        void RescanAndReset(bool showDlg = false) {
+            _selectedLibrary.clear();
+            _selectedIndex = -1;
+            ToggleSelectedButtons(false);
+            ScanAndPopulate(showDlg);
+        }
+
+        void ShowProgress(const char* statusText = nullptr) {
+            if (!::IsWindow(_hProgress)) {
+                _hProgress = ::CreateDialogParam(_hInstance,
+                                                 MAKEINTRESOURCE(IDD_PROGRESS_BOX),
+                                                 _hwnd,
+                                                 Dialog::DialogProc::Progress,
+                                                 (LPARAM)0);
+                ::EnableWindow(_hwnd, FALSE);
             }
 
-            _libManager.Scan(_listView, true);
-            _selectedLibrary = "";
-            _selectedIndex   = -1;
-            ::EnableWindow(_relocateSelectedButton, false);
-            ::EnableWindow(_removeSelectedButton, false);
-            ::SetWindowText(_label, std::format("Select a library to remove (found {}):", _libManager.Count()).c_str());
+            if (statusText && ::IsWindow(_hProgress)) {
+                ::SetDlgItemText(_hProgress, IDC_PROGRESS_TEXT, statusText);
+            }
+        }
+
+        void HideProgress() {
+            if (::IsWindow(_hProgress)) {
+                ::DestroyWindow(_hProgress);
+                _hProgress = nullptr;
+                ::EnableWindow(_hwnd, TRUE);
+                ::SetForegroundWindow(_hwnd);
+            }
         }
 
         void OnCreate(HWND hwnd) {
@@ -1414,7 +1811,7 @@ namespace K8 {
                                DEFAULT_PITCH | FF_DONTCARE,
                                "Segoe UI");
             if (!_font) {
-                _WARN("Failed to create default font. Falling back to system font.");
+                _Warn("Failed to create default font. Falling back to system font.");
             }
 
             HMENU hMenubar = CreateMenu();
@@ -1531,9 +1928,9 @@ namespace K8 {
                                                        nullptr);
             ::SendMessage(_relocateSelectedButton, WM_SETFONT, (WPARAM)_font, TRUE);
 
-            _libManager.Scan(_listView);
+            ScanAndPopulate();
 
-            ::SetWindowText(_label, std::format("Select a library to remove (found {}):", _libManager.Count()).c_str());
+            ::SetWindowText(_label, std::format("Select a library to remove (found {}):", _libraries.size()).c_str());
         }
 
         void OnRemove() {
@@ -1553,23 +1950,36 @@ namespace K8 {
             if (_selectedLibrary.empty())
                 return;
 
-            auto* data             = new Dialog::RemoveSelectedDialogData;
-            data->library          = _libManager.GetLibrary(_selectedLibrary);
-            data->backupRegistry   = false;
-            data->removeContentDir = true;
+            const LibraryInfo& lib = _libraries[_selectedIndex];
 
-            const auto result = Dialog::ShowRemoveSelected(_hInstance, _hwnd, data);
+            Dialog::Data::RemoveSelectedDialogData data;
+            data.libraryInfo    = lib;
+            data.backupRegistry = false;
+            data.removeContent  = true;
+
+            const auto result = Dialog::ShowRemoveSelected(_hInstance, _hwnd, &data);
             if (result == ID_REMOVE_SELECTED_REMOVE) {
-                _INFO(
+                _Info(
                   "Removing library:\n  - Name: %s\n  - Content Directory: %s\n  - Backup: %s\n  - Remove Content: %s",
-                  _selectedLibrary.c_str(),
-                  data->library.second.c_str(),
-                  data->backupRegistry ? "True" : "False",
-                  data->removeContentDir ? "True" : "False");
+                  lib.name,
+                  lib.contentDir,
+                  data.backupRegistry ? "True" : "False",
+                  data.removeContent ? "True" : "False");
+
+                ShowProgress("Removing library...");
 
                 // Spawn removal thread
-                _worker = std::jthread([&](std::stop_token stoken) { Threads::RemoveSelected(_hwnd, data, stoken); });
-                ToggleButtons(false);
+                _worker = std::jthread([&](std::stop_token st) {
+                    Threads::RemoveSelected(_hwnd,
+                                            _hProgress,
+                                            lib.name,
+                                            lib.contentDir,
+                                            lib.registryRoot,
+                                            lib.subKey,
+                                            data.backupRegistry,
+                                            data.removeContent,
+                                            st);
+                });
             }
         }
 
@@ -1585,11 +1995,12 @@ namespace K8 {
                            "K8Tool",
                            MB_YESNO | MB_ICONQUESTION);
             if (response == IDYES) {
-                RescanAndReset();
+                RescanAndReset(true);
             }
         }
 
         void OnCollectBackups() const {
+            _Info("Collecting backups...");
             std::thread([&] {
                 if (!fs::exists("backup")) {
                     ::PostMessage(_hwnd, WM_COLLECT_BACKUPS_COMPLETED, 0, (LPARAM) nullptr);
@@ -1611,30 +2022,34 @@ namespace K8 {
             }).detach();
         }
 
-        void OnExit() const {
+        void OnExit() {
             const auto response =
               ::MessageBox(_hwnd, "Are you sure you want to exit?", "K8Tool", MB_YESNO | MB_ICONQUESTION);
             if (response == IDYES) {
+                if (_worker.joinable()) {
+                    _worker.request_stop();
+                    _worker.join();
+                }
                 ::PostQuitMessage(0);
             }
         }
 
         void OnUpdateCheckCompleted(const Update::CheckResult* result) const {
-            switch (result->compare) {
-                case Update::kResultCurrent: {
-                    _INFO("Update check completed (UP-TO-DATE)");
+            switch (result->result) {
+                case Update::kResultUpToDate: {
+                    _Info("Update check completed (UP-TO-DATE)");
                     ::MessageBox(_hwnd, "You're running the latest version!", "Update", MB_OK | MB_ICONINFORMATION);
                     break;
                 }
 
-                case Update::kResultOld: {
+                case Update::kResultNewer: {
                     const auto message = std::format("A new version of K8-LRT is available!\n\n"
                                                      "Current: {}\n"
                                                      "Latest: {}\n\n"
                                                      "Visit the GitHub releases page to download?",
                                                      VER_PRODUCTVERSION_STR,
                                                      &result->currentVersion[0] + 1);
-                    _INFO("Update check completed (OUTDATED)");
+                    _Info("Update check completed (OUTDATED)");
 
                     const int response =
                       ::MessageBox(_hwnd, message.c_str(), "Update Available", MB_YESNO | MB_ICONINFORMATION);
@@ -1655,7 +2070,7 @@ namespace K8 {
                                   "stable release of K8Tool.",
                                   &result->currentVersion[0] + 1,
                                   VER_PRODUCTVERSION_STR);
-                    _INFO("Update check completed (DEV BUILD)");
+                    _Info("Update check completed (DEV BUILD)");
                     ::MessageBox(_hwnd, message.c_str(), "Update", MB_OK | MB_ICONWARNING);
                     break;
                 }
@@ -1664,16 +2079,17 @@ namespace K8 {
         }
 
         void OnRemoveSelectedCompleted(const Threads::RemoveSelectedResult* result) {
+            HideProgress();
+
             const bool success   = result->success;
             const bool cancelled = result->cancelled;
             delete result;
 
             _worker = {};
-            ToggleButtons(true);
 
             if (success) {
                 ::MessageBox(_hwnd, "Library removed successfully.", "K8Tool", MB_OK | MB_ICONINFORMATION);
-                RescanAndReset();
+                RescanAndReset(true);
             } else {
                 if (cancelled) {
                     ::MessageBox(_hwnd, "Operation was cancelled.", "K8Tool", MB_OK | MB_ICONWARNING);
@@ -1701,8 +2117,8 @@ namespace K8 {
                 case WM_CTLCOLORSTATIC: {
                     HDC hdc = (HDC)wParam;
                     // HWND control = (HWND)lParam;
-                    SetBkMode(hdc, TRANSPARENT);
-                    return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
+                    ::SetBkMode(hdc, TRANSPARENT);
+                    return (LRESULT)::GetSysColorBrush(COLOR_WINDOW);
                 }
 
                 case WM_NOTIFY: {
@@ -1710,15 +2126,12 @@ namespace K8 {
                     if (lpnmh->idFrom == kIDC_ListView && lpnmh->code == LVN_ITEMCHANGED) {
                         LPNMLISTVIEW pnmv = (LPNMLISTVIEW)lParam;
                         if ((pnmv->uChanged & LVIF_STATE) && (pnmv->uNewState & LVIS_SELECTED)) {
-                            // Retrieve selected library name
                             _selectedIndex   = pnmv->iItem;
                             char buffer[256] = {'\0'};
                             ListView_GetItemText(lpnmh->hwndFrom, _selectedIndex, 0, buffer, 256);
                             _selectedLibrary = buffer;
 
-                            // Enable Remove/Relocate buttons
-                            ::EnableWindow(_removeSelectedButton, !_selectedLibrary.empty());
-                            ::EnableWindow(_relocateSelectedButton, !_selectedLibrary.empty());
+                            ToggleSelectedButtons(!_selectedLibrary.empty());
                         }
                     }
 
@@ -1786,7 +2199,7 @@ namespace K8 {
                 case WM_UPDATE_CHECK_COMPLETED: {
                     const auto result = reinterpret_cast<Update::CheckResult*>(lParam);
                     if (!result) {
-                        _ERROR("Failed to get result from update check.");
+                        _Error("Failed to get result from update check.");
                         break;
                     }
                     OnUpdateCheckCompleted(result);
@@ -1796,7 +2209,7 @@ namespace K8 {
                 case WM_REMOVE_SELECTED_COMPLETED: {
                     const auto result = reinterpret_cast<Threads::RemoveSelectedResult*>(lParam);
                     if (!result) {
-                        _ERROR("Failed to get result from update check.");
+                        _Error("Failed to get result from update check.");
                         break;
                     }
                     OnRemoveSelectedCompleted(result);
@@ -1806,13 +2219,13 @@ namespace K8 {
                 case WM_COLLECT_BACKUPS_COMPLETED: {
                     const auto result = reinterpret_cast<const char*>(lParam);
                     if (!result) {
-                        _ERROR("Failed to collect backups.");
+                        _Error("Failed to collect backups.");
                         ::MessageBox(_hwnd, "Failed to collect backups.", "K8Tool", MB_ICONERROR | MB_OK);
                     }
 
                     const auto _msg = std::format("Collected backups to:\n{}",
                                                   fs::absolute(fs::current_path() / result).string().c_str());
-                    _INFO(_msg.c_str());
+                    _Info(_msg.c_str());
                     ::MessageBox(_hwnd, _msg.c_str(), "K8Tool", MB_ICONINFORMATION | MB_OK);
                     delete result;
                 }
@@ -1845,11 +2258,15 @@ namespace K8 {
 }  // namespace K8
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
-    _UNUSED(hPrevInstance);
-    _UNUSED(lpCmdLine);
+    _Unused(hPrevInstance);
+    _Unused(lpCmdLine);
+
+    K8::logger = new K8::Logger;
 
     using namespace K8;
     try {
-        return Application {hInstance, "K8Tool - v" VER_FILEVERSION_STR, 600, 420, nCmdShow}.Run();
-    } catch (const std::exception& ex) { _FATAL("A fatal error occurred during startup:\n\n%s", ex.what()); }
+        const int result = Application {hInstance, "K8Tool - v" VER_FILEVERSION_STR, 600, 420, nCmdShow}.Run();
+        delete logger;
+        return result;
+    } catch (const std::exception& ex) { _Fatal("A fatal error occurred during startup:\n\n%s", ex.what()); }
 }
