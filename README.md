@@ -17,7 +17,7 @@ Locations that need to be searched and deleted:
 - `C:\Users\Public\Documents\Native Instruments\Native Access\ras3\<filename>.jwt`
 - `C:\Program Files\Common Files\Native Instruments\Kontakt 8\PAResources` [?]
 
-## What It Do
+## What It Does
 
 This process of steps is executed by the program to remove libraries. In theory, you could do all
 of this manually. K8Tool just makes it a lot easier.

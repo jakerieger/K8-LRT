@@ -48,8 +48,7 @@
     REVISION HISTORY
 
         3.0.0  (2026-02-01)  migrated to C++ codebase, multi-threading, progress indicator,
-                             unified file api via IFileOperation, refactored file operations,
-                             dark mode
+                             refactored file operations
         2.0.0  (2026-01-31)  bug fixes for registry querying, relocating libraries,
                              removed support for Windows 7, string pool
                              memory management, wide path support
@@ -1981,7 +1980,8 @@ namespace K8 {
         }
 
         void OnRemove() {
-            const auto result = Dialog::ShowRemove(_hInstance, _hwnd);
+            ::MessageBox(_hwnd, "This feature isn't available yet.", "K8Tool", MB_OK | MB_ICONWARNING);
+            // const auto result = Dialog::ShowRemove(_hInstance, _hwnd);
             // if (result == ID_REMOVE_REMOVE) {}
         }
 
@@ -2031,7 +2031,8 @@ namespace K8 {
         }
 
         void OnRelocateSelected() {
-            const auto result = Dialog::ShowRelocateSelected(_hInstance, _hwnd);
+            ::MessageBox(_hwnd, "This feature isn't available yet.", "K8Tool", MB_OK | MB_ICONWARNING);
+            // const auto result = Dialog::ShowRelocateSelected(_hInstance, _hwnd);
             // if (result == ID_RELOCATE_SELECTED_RELOCATE) {}
         }
 
