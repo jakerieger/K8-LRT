@@ -61,6 +61,7 @@
         0.1.0  (2026-01-22)  initial release of K8Tool (formerly K8Tool)
 */
 
+// ReSharper disable All
 #include "version.h"
 #include "resource.h"
 
@@ -113,6 +114,7 @@
 #include <zip_file.hpp>
 
 #define _Unused(x) (void)(x)
+#define _Not_Implemented() _Fatal("Function '%s' is not implemeted (%s:%d)", __FUNCTION__, __FILE__, __LINE__ - 1)
 
 namespace K8 {
     namespace fs = std::filesystem;
@@ -276,7 +278,6 @@ namespace K8 {
 #define _Fatal(fmt, ...)                                                                                               \
     do {                                                                                                               \
         logger->Log(LogLevel::Fatal, fmt, ##__VA_ARGS__);                                                              \
-        ::MessageBox(nullptr, fmt, "K8Tool", MB_OK | MB_ICONERROR);                                                    \
         std::quick_exit(-1);                                                                                           \
     } while (0);
 
@@ -315,8 +316,9 @@ namespace K8 {
     struct LibraryInfo {
         const char* name;        // str pool
         const char* contentDir;  // str pool
-        HKEY registryRoot;       // HKEY_LOCAL_MACHINE or HKEY_CURRENT_USER
-        const char* subKey;      // str pool
+        uintmax_t sizeOnDisk;
+        HKEY registryRoot;   // HKEY_LOCAL_MACHINE or HKEY_CURRENT_USER
+        const char* subKey;  // str pool
     };
 
     using LibraryList = std::vector<LibraryInfo>;
@@ -397,6 +399,82 @@ namespace K8 {
 
             return output;
         }
+
+        static uintmax_t GetDirectorySize(const fs::path& dir) {
+            uintmax_t size = 0;
+            std::error_code ec;
+
+            for (const auto& entry : fs::recursive_directory_iterator(dir, ec)) {
+                if (ec) {
+                    _Warn("Error iterating: %s", ec.message().c_str());
+                    ec.clear();
+                    continue;
+                }
+
+                if (entry.is_regular_file(ec) && !ec) {
+                    size += entry.file_size(ec);
+                }
+            }
+
+            return size;
+        }
+
+        static std::string FormatFileSize(uintmax_t bytes) {
+            const char* suffixes[] = {"B", "KB", "MB", "GB", "TB", "PB"};
+            int suffixIndex        = 0;
+            double size            = static_cast<double>(bytes);
+
+            while (size >= 1000.0 && suffixIndex < 5) {
+                size /= 1024.0;
+                suffixIndex++;
+            }
+
+            // Format with 1 decimal place
+            char buffer[32];
+            snprintf(buffer, sizeof(buffer), "%.1f %s", size, suffixes[suffixIndex]);
+
+            return std::string(buffer);
+        }
+
+        static bool ExportListViewToCSV(HWND hListView, const fs::path& csvPath) {
+            std::ofstream file(csvPath);
+            if (!file.is_open()) {
+                _Error("Failed to create CSV file: %s", csvPath.string().c_str());
+                return false;
+            }
+
+            HWND hHeader    = ListView_GetHeader(hListView);
+            int columnCount = Header_GetItemCount(hHeader);
+            char buffer[512];
+
+            // Header
+            for (int col = 0; col < columnCount; col++) {
+                LVCOLUMN lvc   = {};
+                lvc.mask       = LVCF_TEXT;
+                lvc.pszText    = buffer;
+                lvc.cchTextMax = sizeof(buffer);
+                ListView_GetColumn(hListView, col, &lvc);
+                file << "\"" << buffer << "\"";
+                if (col < columnCount - 1)
+                    file << ",";
+            }
+            file << "\n";
+
+            // Data
+            int itemCount = ListView_GetItemCount(hListView);
+            for (int row = 0; row < itemCount; row++) {
+                for (int col = 0; col < columnCount; col++) {
+                    ListView_GetItemText(hListView, row, col, buffer, sizeof(buffer));
+                    file << "\"" << buffer << "\"";
+                    if (col < columnCount - 1)
+                        file << ",";
+                }
+                file << "\n";
+            }
+
+            file.close();
+            return true;
+        }
     }  // namespace Util
 
 #pragma endregion
@@ -409,7 +487,7 @@ namespace K8 {
             std::string name;
         };
 
-        static std::optional<LibraryXMLInfo> GetSNPID(const fs::path& xmlPath) {
+        static std::optional<LibraryXMLInfo> GetSNPID(const fs::path& xmlPath, const std::string& libraryName) {
             namespace x = tinyxml2;
 
             x::XMLDocument doc;
@@ -418,80 +496,17 @@ namespace K8 {
                 return std::nullopt;
             }
 
-            x::XMLElement* root = doc.FirstChildElement("adg:NativeAccess");
+            x::XMLElement* root = doc.FirstChildElement("ProductHints");
             if (!root) {
-                root = doc.FirstChildElement("NativeAccess");
-                if (!root) {
-                    _Error("Root element not found in XML: %s", xmlPath.string().c_str());
-                    return std::nullopt;
-                }
-            }
-
-            const x::XMLElement* content = root->FirstChildElement("adg:Content");
-            if (!content) {
-                content = root->FirstChildElement("Content");
-                if (!content) {
-                    _Error("Content element not found in XML: %s", xmlPath.string().c_str());
-                    return std::nullopt;
-                }
-            }
-
-            const char* snpid = content->Attribute("SNPID");
-            if (!snpid) {
-                _Error("SNPID attribute not found in XML: %s", xmlPath.string().c_str());
+                _Error("Root element 'ProductHints' not found in XML: %s", xmlPath.string().c_str());
                 return std::nullopt;
             }
 
-            const char* name = content->Attribute("name");
-
-            return LibraryXMLInfo {snpid, name ? name : ""};
-        }
-
-        static std::optional<LibraryXMLInfo> FindLibraryInXML(const fs::path& xmlPath, const std::string& libraryName) {
-            namespace x = tinyxml2;
-
-            x::XMLDocument doc;
-            if (doc.LoadFile(xmlPath.string().c_str()) != x::XML_SUCCESS) {
-                _Error("Failed to load XML file: %s", xmlPath.string().c_str());
-                return std::nullopt;
-            }
-
-            x::XMLElement* root = doc.FirstChildElement("adg:NativeAccess");
-            if (!root) {
-                root = doc.FirstChildElement("NativeAccess");
-                if (!root) {
-                    _Error("Root element not found in XML: %s", xmlPath.string().c_str());
-                    return std::nullopt;
-                }
-            }
-
-            x::XMLElement* installedContent = root->FirstChildElement("adg:InstalledContent");
-            if (!installedContent) {
-                installedContent = root->FirstChildElement("InstalledContent");
-                if (!installedContent) {
-                    _Error("InstalledContent element not found in XML: %s", xmlPath.string().c_str());
-                    return std::nullopt;
-                }
-            }
-
-            for (x::XMLElement* content = installedContent->FirstChildElement("adg:Content"); content != nullptr;
-                 content                = content->NextSiblingElement("adg:Content")) {
-                const char* name = content->Attribute("name");
+            for (x::XMLElement* product = root->FirstChildElement("Product"); product != nullptr;
+                 product                = product->NextSiblingElement("Product")) {
+                const char* name = product->FirstChildElement("Name")->GetText();
                 if (name && std::string(name) == libraryName) {
-                    const char* snpid = content->Attribute("SNPID");
-                    if (!snpid) {
-                        _Error("SNPID attribute not found in XML: %s", xmlPath.string().c_str());
-                        return std::nullopt;
-                    }
-                    return LibraryXMLInfo {snpid, name};
-                }
-            }
-
-            for (x::XMLElement* content = installedContent->FirstChildElement("Content"); content != nullptr;
-                 content                = content->NextSiblingElement("Content")) {
-                const char* name = content->Attribute("name");
-                if (name && std::string(name) == libraryName) {
-                    const char* snpid = content->Attribute("SNPID");
+                    const char* snpid = product->FirstChildElement("SNPID")->GetText();
                     if (!snpid) {
                         _Error("SNPID attribute not found in XML: %s", xmlPath.string().c_str());
                         return std::nullopt;
@@ -613,6 +628,7 @@ namespace K8 {
                             info.contentDir   = pool.Intern(contentDir);
                             info.registryRoot = hKey;
                             info.subKey       = pool.Intern(libraryKeyPath);
+                            info.sizeOnDisk   = Util::GetDirectorySize(contentDir);
 
                             libraries.push_back(info);
                         }
@@ -1199,31 +1215,6 @@ namespace K8 {
                 return (INT_PTR)FALSE;
             }
 
-            static INT_PTR CALLBACK Progress(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-                switch (msg) {
-                    case WM_INITDIALOG: {
-                        HWND hProgress = ::GetDlgItem(hwnd, IDC_PROGRESS_BAR);
-                        ::SendMessage(hProgress, PBM_SETMARQUEE, TRUE, 30);
-                        return (INT_PTR)TRUE;
-                    }
-
-                    case WM_UPDATE_PROGRESS_TEXT: {
-                        auto* text = (const char*)lParam;
-                        if (text) {
-                            ::SetDlgItemText(hwnd, IDC_PROGRESS_TEXT, text);
-                            delete[] text;
-                            return (INT_PTR)TRUE;
-                        }
-                        return (INT_PTR)FALSE;
-                    }
-
-                    case WM_CLOSE:
-                        return (INT_PTR)TRUE;  // Block user from closing
-                }
-
-                return (INT_PTR)FALSE;
-            }
-
             static INT_PTR CALLBACK Remove(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 return (INT_PTR)FALSE;
             }
@@ -1399,19 +1390,15 @@ namespace K8 {
                 char* statusCopy   = new char[status.size() + 1];
                 strcpy_s(statusCopy, status.size() + 1, status.c_str());
                 ::PostMessage(hwndProgress, WM_UPDATE_PROGRESS_TEXT, 0, (LPARAM)statusCopy);
-                std::this_thread::sleep_for(std::chrono::seconds(2));
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
             }
 
             std::optional<XML::LibraryXMLInfo> xmlInfo;
             fs::path xmlPath = fs::path(Globals::kServiceCenter) / (libraryName + ".xml");
-            if (Util::FileExists(xmlPath)) {
-                xmlInfo = XML::GetSNPID(xmlPath);
-            } else {
-                xmlPath = Globals::kNativeAccessXML;
-                if (Util::FileExists(xmlPath)) {
-                    xmlInfo = XML::FindLibraryInXML(xmlPath, libraryName);
-                }
+            if (!Util::FileExists(xmlPath)) {
+                xmlPath = fs::path(Globals::kNativeAccessXML);
             }
+            xmlInfo = XML::GetSNPID(xmlPath, libraryName);
 
             if (!xmlInfo.has_value()) {
                 _Error("Could not find SNPID for library: %s", libraryName.c_str());
@@ -1431,7 +1418,7 @@ namespace K8 {
                 char* statusCopy   = new char[status.size() + 1];
                 strcpy_s(statusCopy, status.size() + 1, status.c_str());
                 ::PostMessage(hwndProgress, WM_UPDATE_PROGRESS_TEXT, 0, (LPARAM)statusCopy);
-                std::this_thread::sleep_for(std::chrono::seconds(2));
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
             }
 
             if (xmlPath.filename() != "NativeAccess.xml") {
@@ -1452,7 +1439,7 @@ namespace K8 {
                 char* statusCopy   = new char[status.size() + 1];
                 strcpy_s(statusCopy, status.size() + 1, status.c_str());
                 ::PostMessage(hwndProgress, WM_UPDATE_PROGRESS_TEXT, 0, (LPARAM)statusCopy);
-                std::this_thread::sleep_for(std::chrono::seconds(2));
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
             }
 
             const fs::path cacheDir = fs::path(Util::GetLocalAppData()) / Globals::kLibrariesCache;
@@ -1476,7 +1463,7 @@ namespace K8 {
                 char* statusCopy   = new char[status.size() + 1];
                 strcpy_s(statusCopy, status.size() + 1, status.c_str());
                 ::PostMessage(hwndProgress, WM_UPDATE_PROGRESS_TEXT, 0, (LPARAM)statusCopy);
-                std::this_thread::sleep_for(std::chrono::seconds(2));
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
             }
 
             const fs::path db3Path = fs::path(Util::GetLocalAppData()) / Globals::kKompleteDB3;
@@ -1498,7 +1485,7 @@ namespace K8 {
                 char* statusCopy   = new char[status.size() + 1];
                 strcpy_s(statusCopy, status.size() + 1, status.c_str());
                 ::PostMessage(hwndProgress, WM_UPDATE_PROGRESS_TEXT, 0, (LPARAM)statusCopy);
-                std::this_thread::sleep_for(std::chrono::seconds(2));
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
             }
 
             const fs::path ras3Dir = Globals::kRAS3;
@@ -1525,7 +1512,7 @@ namespace K8 {
                     char* statusCopy   = new char[status.size() + 1];
                     strcpy_s(statusCopy, status.size() + 1, status.c_str());
                     ::PostMessage(hwndProgress, WM_UPDATE_PROGRESS_TEXT, 0, (LPARAM)statusCopy);
-                    std::this_thread::sleep_for(std::chrono::seconds(2));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
                 }
 
                 if (!FileOps::DeleteItem(contentDir)) {
@@ -1545,12 +1532,11 @@ namespace K8 {
                 char* statusCopy   = new char[status.size() + 1];
                 strcpy_s(statusCopy, status.size() + 1, status.c_str());
                 ::PostMessage(hwndProgress, WM_UPDATE_PROGRESS_TEXT, 0, (LPARAM)statusCopy);
-                std::this_thread::sleep_for(std::chrono::seconds(2));
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
             }
 
             if (backupRegistry) {
-                const auto timestamp      = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-                const fs::path backupPath = fs::current_path() / "backup" / std::format("{}.reg", timestamp);
+                const fs::path backupPath = fs::current_path() / "backup" / std::format("{}.reg", libraryName);
                 if (!Registry::BackupKey(registryRoot, registrySubKey.c_str(), backupPath)) {
                     _Warn("Failed to backup registry key for library: %s", libraryName.c_str());
                 }
@@ -1595,6 +1581,8 @@ namespace K8 {
         HWND _removeSelectedButton;
         HWND _relocateSelectedButton;
         HWND _rescanLibrariesButton;
+        HWND _progressLabel;
+        HWND _progressBar;
 
         // UI Element IDs
         static constexpr int kIDC_ListView               = 101;
@@ -1603,6 +1591,8 @@ namespace K8 {
         static constexpr int kIDC_RelocateSelectedButton = 104;
         static constexpr int kIDC_SelectLibraryLabel     = 105;
         static constexpr int kIDC_RescanLibrariesButton  = 106;
+        static constexpr int kIDC_ProgressLabel          = 107;
+        static constexpr int kIDC_ProgressBar            = 108;
 
         // Business-logic members
         LibraryList _libraries       = {};
@@ -1683,6 +1673,11 @@ namespace K8 {
                 fs::create_directory("backup");
             }
 
+            // Create export directory if it does not exist
+            if (!fs::exists("export")) {
+                fs::create_directory("export");
+            }
+
             // Initialize COM
             auto hr = ::CoInitializeEx(nullptr, COINIT_MULTITHREADED);
             if (FAILED(hr)) {
@@ -1753,6 +1748,10 @@ namespace K8 {
                 ListView_InsertItem(_listView, &lvi);
 
                 ListView_SetItemText(_listView, static_cast<int>(i), 1, const_cast<char*>(_libraries[i].contentDir));
+
+                // Convert size on disk to string
+                const auto sizeOnDisk = Util::FormatFileSize(_libraries[i].sizeOnDisk);
+                ListView_SetItemText(_listView, static_cast<int>(i), 2, const_cast<char*>(sizeOnDisk.c_str()));
             }
             _Info("Populated ListView with %zu libraries", _libraries.size());
             if (showDlg) {
@@ -1769,30 +1768,47 @@ namespace K8 {
             _selectedIndex = -1;
             ToggleSelectedButtons(false);
             ScanAndPopulate(showDlg);
+            ::SetWindowText(_label, std::format("Select a library to remove (found {}):", _libraries.size()).c_str());
         }
 
-        void ShowProgress(const char* statusText = nullptr) {
-            if (!::IsWindow(_hProgress)) {
-                _hProgress = ::CreateDialogParam(_hInstance,
-                                                 MAKEINTRESOURCE(IDD_PROGRESS_BOX),
-                                                 _hwnd,
-                                                 Dialog::DialogProc::Progress,
-                                                 (LPARAM)0);
-                ::EnableWindow(_hwnd, FALSE);
-            }
+        void ShowProgress(const char* statusText = nullptr) const {
+            // Hide non-progress UI elements
+            ::ShowWindow(_label, SW_HIDE);
+            ::ShowWindow(_rescanLibrariesButton, SW_HIDE);
+            ::ShowWindow(_listView, SW_HIDE);
+            ::ShowWindow(_removeButton, SW_HIDE);
+            ::ShowWindow(_removeSelectedButton, SW_HIDE);
+            ::ShowWindow(_relocateSelectedButton, SW_HIDE);
 
-            if (statusText && ::IsWindow(_hProgress)) {
-                ::SetDlgItemText(_hProgress, IDC_PROGRESS_TEXT, statusText);
+            // Show progress UI elements
+            ::ShowWindow(_progressLabel, SW_SHOW);
+            ::ShowWindow(_progressBar, SW_SHOW);
+            // Start progress bar marquee animation
+            ::SendMessage(_progressBar, PBM_SETMARQUEE, TRUE, 30);
+
+            if (statusText != nullptr) {
+                UpdateProgressText(statusText);
             }
         }
 
-        void HideProgress() {
-            if (::IsWindow(_hProgress)) {
-                ::DestroyWindow(_hProgress);
-                _hProgress = nullptr;
-                ::EnableWindow(_hwnd, TRUE);
-                ::SetForegroundWindow(_hwnd);
-            }
+        void HideProgress() const {
+            // Show non-progress UI elements
+            ::ShowWindow(_label, SW_SHOW);
+            ::ShowWindow(_rescanLibrariesButton, SW_SHOW);
+            ::ShowWindow(_listView, SW_SHOW);
+            ::ShowWindow(_removeButton, SW_SHOW);
+            ::ShowWindow(_removeSelectedButton, SW_SHOW);
+            ::ShowWindow(_relocateSelectedButton, SW_SHOW);
+
+            // Hide progress UI elements
+            ::ShowWindow(_progressLabel, SW_HIDE);
+            ::ShowWindow(_progressBar, SW_HIDE);
+            // Stop progress bar animation
+            ::SendMessage(_progressBar, PBM_SETMARQUEE, FALSE, NULL);
+        }
+
+        void UpdateProgressText(const char* text) const {
+            ::SetWindowText(_progressLabel, text);
         }
 
         void OnCreate(HWND hwnd) {
@@ -1820,6 +1836,7 @@ namespace K8 {
             AppendMenu(hMenu, MF_STRING, ID_MENU_VIEW_LOG, "&View Log");
             AppendMenu(hMenu, MF_STRING, ID_MENU_RESCAN_LIBRARIES, "&Rescan Libraries");
             AppendMenu(hMenu, MF_STRING, ID_MENU_COLLECT_BACKUPS, "&Collect Backups and Zip");
+            AppendMenu(hMenu, MF_STRING, ID_MENU_EXPORT_LIBRARY_LIST, "&Export Library List");
             AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
             AppendMenu(hMenu, MF_STRING, ID_MENU_ABOUT, "&About");
             AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
@@ -1870,19 +1887,22 @@ namespace K8 {
             ListView_SetExtendedListViewStyle(_listView, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_GRIDLINES);
 
             LVCOLUMN lvc;
-            lvc.mask        = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
-            char name[]     = "Name";
-            char location[] = "Location";
+            lvc.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
             // Column 1: Name
             lvc.iSubItem = 0;
-            lvc.pszText  = name;
+            lvc.pszText  = (char*)"Name";
             lvc.cx       = 200;
             ListView_InsertColumn(_listView, 0, &lvc);
             // Column 2: ContentDir
             lvc.iSubItem = 1;
-            lvc.pszText  = location;
-            lvc.cx       = 340;
+            lvc.pszText  = (char*)"Content Directory";
+            lvc.cx       = 260;
             ListView_InsertColumn(_listView, 1, &lvc);
+            // Column 3: Size on disk
+            lvc.iSubItem = 2;
+            lvc.pszText  = (char*)"Size";
+            lvc.cx       = 80;
+            ListView_InsertColumn(_listView, 2, &lvc);
 
             constexpr auto buttonWidth  = 184;
             constexpr auto buttonHeight = 30;
@@ -1928,6 +1948,33 @@ namespace K8 {
                                                        nullptr);
             ::SendMessage(_relocateSelectedButton, WM_SETFONT, (WPARAM)_font, TRUE);
 
+            // Progress bar and label (initially hidden - missing WS_VISIBLE flag)
+            _progressLabel = ::CreateWindow("STATIC",
+                                            "Removing library 'Ultimate Heavy Drums'...",
+                                            WS_CHILD | SS_CENTER,
+                                            0,
+                                            (_height / 3),
+                                            _width,
+                                            16,
+                                            hwnd,
+                                            (HMENU)kIDC_ProgressLabel,
+                                            _hInstance,
+                                            nullptr);
+            ::SendMessage(_progressLabel, WM_SETFONT, (WPARAM)_font, TRUE);
+
+            _progressBar = ::CreateWindowEx(0,
+                                            PROGRESS_CLASS,
+                                            "",
+                                            WS_CHILD | PBS_MARQUEE,
+                                            30,
+                                            (_height / 3) + 30,
+                                            _width - 80,
+                                            20,
+                                            hwnd,
+                                            (HMENU)kIDC_ProgressBar,
+                                            _hInstance,
+                                            nullptr);
+
             ScanAndPopulate();
 
             ::SetWindowText(_label, std::format("Select a library to remove (found {}):", _libraries.size()).c_str());
@@ -1966,7 +2013,7 @@ namespace K8 {
                   data.backupRegistry ? "True" : "False",
                   data.removeContent ? "True" : "False");
 
-                ShowProgress("Removing library...");
+                ShowProgress(std::format("Removing '{}'...", lib.name).c_str());
 
                 // Spawn removal thread
                 _worker = std::jthread([&](std::stop_token st) {
@@ -2099,6 +2146,21 @@ namespace K8 {
             }
         }
 
+        void OnExportLibraryList() {
+            const auto timestamp = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+            const auto filename  = std::format("LibraryList-{}.csv", timestamp);
+            const auto filepath  = fs::current_path() / "export" / filename;
+            const auto exported  = Util::ExportListViewToCSV(_listView, filepath);
+            if (!exported) {
+                ::MessageBox(_hwnd, "Failed to export library list.", "K8Tool", MB_OK | MB_ICONERROR);
+                return;
+            }
+            ::MessageBox(_hwnd,
+                         std::format("Exported library list to:\n{}", filepath.string()).c_str(),
+                         "K8Tool",
+                         MB_OK | MB_ICONINFORMATION);
+        }
+
         LRESULT CALLBACK HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             switch (msg) {
                 case WM_CREATE: {
@@ -2181,6 +2243,11 @@ namespace K8 {
                             OnCollectBackups();
                             break;
                         }
+
+                        case ID_MENU_EXPORT_LIBRARY_LIST: {
+                            OnExportLibraryList();
+                            break;
+                        }
                     }
 
                     return 0;
@@ -2228,6 +2295,10 @@ namespace K8 {
                     _Info(_msg.c_str());
                     ::MessageBox(_hwnd, _msg.c_str(), "K8Tool", MB_ICONINFORMATION | MB_OK);
                     delete result;
+                }
+
+                case WM_UPDATE_PROGRESS_TEXT: {
+                    UpdateProgressText((const char*)lParam);
                 }
             }
 

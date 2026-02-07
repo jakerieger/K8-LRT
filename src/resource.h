@@ -7,6 +7,7 @@
 #define ID_MENU_EXIT 203
 #define ID_MENU_ABOUT 204
 #define ID_MENU_COLLECT_BACKUPS 205
+#define ID_MENU_EXPORT_LIBRARY_LIST 206
 
 // Log viewer edit
 #define IDD_LOGVIEW_BOX 301
