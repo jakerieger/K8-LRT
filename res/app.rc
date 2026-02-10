@@ -63,6 +63,24 @@ BEGIN
     PUSHBUTTON      "Cancel", ID_REMOVE_SELECTED_CANCEL, 230, 179, 76, 14
 END
 
+IDD_RELOCATE_SELECTED_BOX DIALOGEX 0, 0, 320, 120
+STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Relocate Library"
+FONT 8, "MS Shell Dlg", 320, 0, 0x1
+BEGIN
+    ICON            IDI_APPICON, IDC_STATIC, 14, 20, 20, 20
+    LTEXT           "Relocating:", IDC_STATIC, 44, 14, 120, 8
+    LTEXT           "", IDC_RELOCATE_SELECTED_NAME, 44, 28, 120, 8
+    LTEXT           "", IDC_RELOCATE_SELECTED_CONTENT_DIR, 44, 38, 280, 8
+
+    LTEXT           "Select a new location:", IDC_STATIC, 14, 60, 120, 8
+    EDITTEXT        IDC_RELOCATE_SELECTED_PATH_EDIT, 14, 72, 270, 14, ES_AUTOHSCROLL
+    PUSHBUTTON      "...", IDC_RELOCATE_SELECTED_BROWSE_BUTTON, 286, 72, 20, 14
+
+    DEFPUSHBUTTON   "Relocate", ID_RELOCATE_SELECTED_RELOCATE, 140, 96, 80, 14
+    PUSHBUTTON      "Cancel", ID_RELOCATE_SELECTED_CANCEL, 226, 96, 80, 14
+END
+
 //=============================================================================//
 //                         --- VERSION METADATA ---                            //
 //=============================================================================//

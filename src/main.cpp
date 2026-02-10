@@ -90,11 +90,10 @@
 #include <optional>
 
 // Windows API
-#define WIN32_LEAN_AND_MEAN 1
-#define NOMINMAX 1
 #include <commctrl.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <Shobjidl.h>
 #include <windows.h>
 #include <winhttp.h>
 #include <winreg.h>
@@ -102,10 +101,12 @@
 // Conflicts with zip_file.hpp (I don't need these anyway)
 #ifdef min
     #undef min
+    #define _Min(a, b) (((a) < (b)) ? (a) : (b))
 #endif
 
 #ifdef max
     #undef max
+    #define _Max(a, b) (((a) > (b)) ? (a) : (b))
 #endif
 
 // Vendor
@@ -113,7 +114,7 @@
 #include <zip_file.hpp>
 
 #define _Unused(x) (void)(x)
-#define _Not_Implemented() _Fatal("Function '%s' is not implemeted (%s:%d)", __FUNCTION__, __FILE__, __LINE__ - 1)
+#define _Not_Implemented() _Fatal("Function '%s' is not implemeted (%s:%d)", __FUNCTION__, __FILE__, __LINE__)
 
 namespace K8 {
     namespace fs = std::filesystem;
@@ -474,6 +475,59 @@ namespace K8 {
             file.close();
             return true;
         }
+
+        static std::wstring OpenFolderDialog(HWND hwndOwner = nullptr, const char* title = nullptr) {
+            std::wstring folderPath;
+            IFileDialog* pFileDialog = nullptr;
+
+            HRESULT hr = ::CoCreateInstance(CLSID_FileOpenDialog,
+                                            nullptr,
+                                            CLSCTX_ALL,
+                                            IID_IFileDialog,
+                                            reinterpret_cast<void**>(&pFileDialog));
+
+            if (SUCCEEDED(hr)) {
+                DWORD dwOptions;
+                hr = pFileDialog->GetOptions(&dwOptions);
+                if (SUCCEEDED(hr)) {
+                    hr = pFileDialog->SetOptions(dwOptions | FOS_PICKFOLDERS);
+                }
+
+                if (SUCCEEDED(hr)) {
+                    if (title) {
+                        const auto titleWide = Util::ToWideStr(title);
+                        pFileDialog->SetTitle(titleWide.c_str());
+                    } else {
+                        pFileDialog->SetTitle(L"Select Folder");
+                    }
+                }
+
+                if (SUCCEEDED(hr)) {
+                    hr = pFileDialog->Show(hwndOwner);
+                }
+
+                if (SUCCEEDED(hr)) {
+                    IShellItem* pItem = nullptr;
+                    hr                = pFileDialog->GetResult(&pItem);
+
+                    if (SUCCEEDED(hr)) {
+                        PWSTR pszFilePath = nullptr;
+                        hr                = pItem->GetDisplayName(SIGDN_FILESYSPATH, &pszFilePath);
+
+                        if (SUCCEEDED(hr)) {
+                            folderPath = pszFilePath;
+                            ::CoTaskMemFree(pszFilePath);
+                        }
+
+                        pItem->Release();
+                    }
+                }
+
+                pFileDialog->Release();
+            }
+
+            return folderPath;
+        }
     }  // namespace Util
 
 #pragma endregion
@@ -622,14 +676,18 @@ namespace K8 {
                                                (LPBYTE)contentDir,
                                                &contentDirSize) == ERROR_SUCCESS &&
                             type == REG_SZ) {
-                            LibraryInfo info;
-                            info.name         = pool.Intern(name);
-                            info.contentDir   = pool.Intern(contentDir);
-                            info.registryRoot = hKey;
-                            info.subKey       = pool.Intern(libraryKeyPath);
-                            info.sizeOnDisk   = Util::GetDirectorySize(contentDir);
+                            // Check if content directory exists on disk
+                            bool contentOnDisk = fs::exists(contentDir) && fs::is_directory(contentDir);
+                            if (contentOnDisk) {
+                                LibraryInfo info;
+                                info.name         = pool.Intern(name);
+                                info.contentDir   = pool.Intern(contentDir);
+                                info.registryRoot = hKey;
+                                info.subKey       = pool.Intern(libraryKeyPath);
+                                info.sizeOnDisk   = Util::GetDirectorySize(contentDir);
 
-                            libraries.push_back(info);
+                                libraries.push_back(info);
+                            }
                         }
 
                         ::RegCloseKey(hLibraryKey);
@@ -1125,6 +1183,11 @@ namespace K8 {
                 bool backupRegistry;
                 bool removeContent;
             };
+
+            struct RelocateSelectedDialogData {
+                LibraryInfo libraryInfo;
+                const char* newPath;
+            };
         }  // namespace Data
 
         namespace DialogProc {
@@ -1174,6 +1237,10 @@ namespace K8 {
             static INT_PTR CALLBACK LogViewer(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 switch (msg) {
                     case WM_INITDIALOG: {
+                        HICON hIcon = ::LoadIcon(::GetModuleHandle(nullptr), MAKEINTRESOURCE(IDI_APPICON));
+                        ::SendMessage(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hIcon);
+                        ::SendMessage(hwnd, WM_SETICON, ICON_BIG, (LPARAM)hIcon);
+
                         const auto contents = logger->GetLogContents();
                         if (contents.empty()) {
                             ::MessageBox(hwnd,
@@ -1223,25 +1290,29 @@ namespace K8 {
 
                 switch (msg) {
                     case WM_INITDIALOG: {
+                        HICON hIcon = ::LoadIcon(::GetModuleHandle(nullptr), MAKEINTRESOURCE(IDI_APPICON));
+                        ::SendMessage(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hIcon);
+                        ::SendMessage(hwnd, WM_SETICON, ICON_BIG, (LPARAM)hIcon);
+
                         data = (Data::RemoveSelectedDialogData*)lParam;
 
                         const auto hNameLabel = ::GetDlgItem(hwnd, IDC_REMOVE_SELECTED_NAME);
                         ::SetWindowText(hNameLabel, data->libraryInfo.name);
 
-                        HFONT hFont = CreateFont(16,
-                                                 0,
-                                                 0,
-                                                 0,
-                                                 FW_BOLD,
-                                                 FALSE,
-                                                 FALSE,
-                                                 FALSE,
-                                                 DEFAULT_CHARSET,
-                                                 OUT_DEFAULT_PRECIS,
-                                                 CLIP_DEFAULT_PRECIS,
-                                                 DEFAULT_QUALITY,
-                                                 DEFAULT_PITCH | FF_DONTCARE,
-                                                 "Segoe UI");
+                        HFONT hFont = ::CreateFont(16,
+                                                   0,
+                                                   0,
+                                                   0,
+                                                   FW_BOLD,
+                                                   FALSE,
+                                                   FALSE,
+                                                   FALSE,
+                                                   DEFAULT_CHARSET,
+                                                   OUT_DEFAULT_PRECIS,
+                                                   CLIP_DEFAULT_PRECIS,
+                                                   DEFAULT_QUALITY,
+                                                   DEFAULT_PITCH | FF_DONTCARE,
+                                                   "Segoe UI");
                         ::SendMessage(hNameLabel, WM_SETFONT, (WPARAM)hFont, TRUE);
 
                         const HWND hContentDirLabel = ::GetDlgItem(hwnd, IDC_REMOVE_SELECTED_CONTENT_DIR);
@@ -1308,6 +1379,94 @@ namespace K8 {
             }
 
             static INT_PTR CALLBACK RelocateSelected(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+                static Data::RelocateSelectedDialogData* data = nullptr;
+
+                switch (msg) {
+                    case WM_INITDIALOG: {
+                        HICON hIcon = ::LoadIcon(::GetModuleHandle(nullptr), MAKEINTRESOURCE(IDI_APPICON));
+                        ::SendMessage(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hIcon);
+                        ::SendMessage(hwnd, WM_SETICON, ICON_BIG, (LPARAM)hIcon);
+
+                        data = (Data::RelocateSelectedDialogData*)lParam;
+
+                        HWND hNameLabel = ::GetDlgItem(hwnd, IDC_RELOCATE_SELECTED_NAME);
+                        ::SetWindowText(hNameLabel, data->libraryInfo.name);
+
+                        HFONT h_font = ::CreateFont(16,
+                                                    0,
+                                                    0,
+                                                    0,
+                                                    FW_BOLD,
+                                                    FALSE,
+                                                    FALSE,
+                                                    FALSE,
+                                                    DEFAULT_CHARSET,
+                                                    OUT_DEFAULT_PRECIS,
+                                                    CLIP_DEFAULT_PRECIS,
+                                                    DEFAULT_QUALITY,
+                                                    DEFAULT_PITCH | FF_DONTCARE,
+                                                    "Segoe UI");
+                        ::SendMessage(hNameLabel, WM_SETFONT, (WPARAM)h_font, TRUE);
+
+                        HWND hContentDirLabel = ::GetDlgItem(hwnd, IDC_RELOCATE_SELECTED_CONTENT_DIR);
+                        ::SetWindowText(hContentDirLabel, data->libraryInfo.contentDir);
+
+                        RECT parentRect, dlgRect;
+                        const HWND hParent = ::GetParent(hwnd);
+                        ::GetWindowRect(hParent, &parentRect);
+                        ::GetWindowRect(hwnd, &dlgRect);
+
+                        const int dlgW    = dlgRect.right - dlgRect.left;
+                        const int dlgH    = dlgRect.bottom - dlgRect.top;
+                        const int parentX = parentRect.left;
+                        const int parentY = parentRect.top;
+                        const int parentW = parentRect.right - parentRect.left;
+                        const int parentH = parentRect.bottom - parentRect.top;
+
+                        const int x = parentX + (parentW - dlgW) / 2;
+                        const int y = parentY + (parentH - dlgH) / 2;
+
+                        ::SetWindowPos(hwnd, NULL, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+
+                        return (INT_PTR)TRUE;
+                    }
+
+                    case WM_COMMAND: {
+                        switch (LOWORD(wParam)) {
+                            case IDC_RELOCATE_SELECTED_BROWSE_BUTTON: {
+                                const auto title =
+                                  std::format("Select a new location for '{}'", data->libraryInfo.name);
+                                const auto newPathWide = Util::OpenFolderDialog(hwnd, title.c_str());
+                                const auto newPath     = Util::ToStr(newPathWide);
+                                if (!newPathWide.empty()) {
+                                    ::SetDlgItemText(hwnd, IDC_RELOCATE_SELECTED_PATH_EDIT, newPath.c_str());
+                                    if (data->newPath)
+                                        free((char*)data->newPath);
+                                    data->newPath = _strdup(newPath.c_str());
+                                }
+                                return (INT_PTR)TRUE;
+                            }
+
+                            case ID_RELOCATE_SELECTED_RELOCATE: {
+                                ::EndDialog(hwnd, ID_RELOCATE_SELECTED_RELOCATE);
+                                return (INT_PTR)TRUE;
+                            }
+
+                            case ID_RELOCATE_SELECTED_CANCEL:
+                            case IDCANCEL: {
+                                ::EndDialog(hwnd, IDCANCEL);
+                                return (INT_PTR)TRUE;
+                            }
+                        }
+                        break;
+                    }
+
+                    case WM_CLOSE: {
+                        ::EndDialog(hwnd, IDCANCEL);
+                        return (INT_PTR)TRUE;
+                    }
+                }
+
                 return (INT_PTR)FALSE;
             }
         }  // namespace DialogProc
@@ -1333,8 +1492,13 @@ namespace K8 {
             return result;
         }
 
-        static INT_PTR ShowRelocateSelected(HINSTANCE hInst, HWND hwnd) {
-            return (INT_PTR)FALSE;
+        static INT_PTR ShowRelocateSelected(HINSTANCE hInst, HWND hwnd, const Data::RelocateSelectedDialogData* data) {
+            const auto result = ::DialogBoxParam(hInst,
+                                                 MAKEINTRESOURCE(IDD_RELOCATE_SELECTED_BOX),
+                                                 hwnd,
+                                                 DialogProc::RelocateSelected,
+                                                 (LPARAM)data);
+            return result;
         }
     }  // namespace Dialog
 
@@ -1357,10 +1521,126 @@ namespace K8 {
 #pragma region Threading
 
     namespace Threads {
-        struct RemoveSelectedResult {
+        struct ThreadResult {
             bool success;
             bool cancelled;
+            char errorMessage[256];
         };
+
+        static void _Finish(HWND owner, int msg, bool success, bool cancelled, const char* errorMessage = nullptr) {
+            auto* result      = new ThreadResult {};
+            result->success   = success;
+            result->cancelled = cancelled;
+            if (errorMessage) {
+                const auto maxLen = sizeof(result->errorMessage);
+                std::memset(result->errorMessage, 0, maxLen);
+                std::copy(errorMessage, errorMessage + (maxLen - 1), result->errorMessage);
+                result->errorMessage[maxLen - 1] = '\0';
+                _Error(errorMessage);
+            }
+            ::PostMessage(owner, msg, 0, (LPARAM)result);
+        }
+
+        static void _Progress(HWND progress, const std::string& status) {
+            char* statusCopy = new char[status.length() + 1];
+            std::copy(status.c_str(), status.c_str() + status.length(), statusCopy);
+            ::PostMessage(progress, WM_UPDATE_PROGRESS_TEXT, 0, (LPARAM)statusCopy);
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+
+        static void RelocateSelected(HWND hwndOwner,
+                                     HWND hwndProgress,
+                                     const std::string& libraryName,
+                                     const std::string& contentDir,
+                                     HKEY registryRoot,
+                                     const std::string& registrySubKey,
+                                     const std::string& newPath,
+                                     std::stop_token stopToken) {
+            _Info("Relocating library: %s", libraryName.c_str());
+
+            if (newPath.empty()) {
+                return _Finish(hwndOwner,
+                               WM_RELOCATE_SELECTED_COMPLETED,
+                               false,
+                               false,
+                               "`newPath` is nullptr. Failed to relocate library.");
+            }
+
+            if (stopToken.stop_requested()) {
+                return _Finish(hwndOwner, WM_RELOCATE_SELECTED_COMPLETED, false, true);
+            }
+
+            { _Progress(hwndProgress, "Copying content directory to new location..."); }
+
+            if (!Util::PathExists(contentDir)) {
+                return _Finish(hwndOwner,
+                               WM_RELOCATE_SELECTED_COMPLETED,
+                               false,
+                               false,
+                               std::format("Source content directory does not exist on disk: {}", contentDir).c_str());
+            }
+
+            const fs::path destPath = fs::path(newPath) / libraryName;
+            if (!Util::PathExists(destPath)) {
+                std::error_code ec;
+                if (!fs::create_directories(destPath, ec)) {
+                    return _Finish(
+                      hwndOwner,
+                      WM_RELOCATE_SELECTED_COMPLETED,
+                      false,
+                      false,
+                      std::format("Failed to create destination directory: {} ({})", newPath, ec.message()).c_str());
+                }
+            }
+
+            if (stopToken.stop_requested()) {
+                return _Finish(hwndOwner, WM_RELOCATE_SELECTED_COMPLETED, false, true);
+            }
+
+            if (!FileOps::CopyItem(contentDir, destPath)) {
+                return _Finish(
+                  hwndOwner,
+                  WM_RELOCATE_SELECTED_COMPLETED,
+                  false,
+                  false,
+                  std::format("Failed to copy content directory from {} to {}", contentDir, destPath.string()).c_str());
+            }
+
+            if (stopToken.stop_requested()) {
+                return _Finish(hwndOwner, WM_RELOCATE_SELECTED_COMPLETED, false, true);
+            }
+
+            { _Progress(hwndProgress, "Updating registry..."); }
+
+            HKEY hKey;
+            LONG regResult = ::RegOpenKeyExA(registryRoot, registrySubKey.c_str(), 0, KEY_SET_VALUE, &hKey);
+            if (regResult != ERROR_SUCCESS) {
+                return _Finish(
+                  hwndOwner,
+                  WM_RELOCATE_SELECTED_COMPLETED,
+                  false,
+                  false,
+                  std::format("Failed to open registry key: {} (error code: {})", registrySubKey, regResult).c_str());
+            }
+            regResult = ::RegSetValueExA(hKey,
+                                         "ContentDir",
+                                         0,
+                                         REG_SZ,
+                                         reinterpret_cast<const BYTE*>(destPath.string().c_str()),
+                                         static_cast<DWORD>(destPath.string().length() + 1));
+            ::RegCloseKey(hKey);
+
+            if (regResult != ERROR_SUCCESS) {
+                return _Finish(hwndOwner,
+                               WM_RELOCATE_SELECTED_COMPLETED,
+                               false,
+                               false,
+                               std::format("Failed to update registry value (error code: {})", regResult).c_str());
+            }
+
+            _Info("Successfully relocated library to: %s", newPath.c_str());
+            return _Finish(hwndOwner, WM_RELOCATE_SELECTED_COMPLETED, true, false);
+        }
 
         static void RemoveSelected(HWND hwndOwner,
                                    HWND hwndProgress,
@@ -1373,7 +1653,7 @@ namespace K8 {
                                    std::stop_token stopToken) {
             _Info("Starting removal process for library: %s", libraryName.c_str());
 
-            auto* result      = new RemoveSelectedResult {};
+            auto* result      = new ThreadResult {};
             result->success   = false;
             result->cancelled = false;
 
@@ -1389,7 +1669,7 @@ namespace K8 {
                 char* statusCopy   = new char[status.size() + 1];
                 strcpy_s(statusCopy, status.size() + 1, status.c_str());
                 ::PostMessage(hwndProgress, WM_UPDATE_PROGRESS_TEXT, 0, (LPARAM)statusCopy);
-                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
 
             std::optional<XML::LibraryXMLInfo> xmlInfo;
@@ -1400,9 +1680,8 @@ namespace K8 {
             xmlInfo = XML::GetSNPID(xmlPath, libraryName);
 
             if (!xmlInfo.has_value()) {
-                _Error("Could not find SNPID for library: %s", libraryName.c_str());
-                ::PostMessage(hwndOwner, WM_REMOVE_SELECTED_COMPLETED, 0, (LPARAM)result);
-                return;
+                _Warn("Could not find SNPID for library: %s. Only a partial removal will be done.",
+                      libraryName.c_str());
             }
 
             if (stopToken.stop_requested()) {
@@ -1417,10 +1696,10 @@ namespace K8 {
                 char* statusCopy   = new char[status.size() + 1];
                 strcpy_s(statusCopy, status.size() + 1, status.c_str());
                 ::PostMessage(hwndProgress, WM_UPDATE_PROGRESS_TEXT, 0, (LPARAM)statusCopy);
-                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
 
-            if (xmlPath.filename() != "NativeAccess.xml") {
+            if (exists(xmlPath) && xmlPath.filename() != "NativeAccess.xml") {
                 if (!FileOps::DeleteItem(xmlPath)) {
                     _Error("Failed to delete XML file: %s", xmlPath.string().c_str());
                 }
@@ -1438,14 +1717,16 @@ namespace K8 {
                 char* statusCopy   = new char[status.size() + 1];
                 strcpy_s(statusCopy, status.size() + 1, status.c_str());
                 ::PostMessage(hwndProgress, WM_UPDATE_PROGRESS_TEXT, 0, (LPARAM)statusCopy);
-                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
 
-            const fs::path cacheDir = fs::path(Util::GetLocalAppData()) / Globals::kLibrariesCache;
-            if (Util::PathExists(cacheDir)) {
-                for (const auto& entry : fs::directory_iterator(cacheDir)) {
-                    if (entry.path().filename().string().find("K" + xmlInfo->snpid) != std::string::npos) {
-                        FileOps::DeleteItem(entry.path());
+            if (xmlInfo.has_value()) {
+                const fs::path cacheDir = fs::path(Util::GetLocalAppData()) / Globals::kLibrariesCache;
+                if (Util::PathExists(cacheDir)) {
+                    for (const auto& entry : fs::directory_iterator(cacheDir)) {
+                        if (entry.path().filename().string().find("K" + xmlInfo->snpid) != std::string::npos) {
+                            FileOps::DeleteItem(entry.path());
+                        }
                     }
                 }
             }
@@ -1462,7 +1743,7 @@ namespace K8 {
                 char* statusCopy   = new char[status.size() + 1];
                 strcpy_s(statusCopy, status.size() + 1, status.c_str());
                 ::PostMessage(hwndProgress, WM_UPDATE_PROGRESS_TEXT, 0, (LPARAM)statusCopy);
-                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
 
             const fs::path db3Path = fs::path(Util::GetLocalAppData()) / Globals::kKompleteDB3;
@@ -1484,15 +1765,17 @@ namespace K8 {
                 char* statusCopy   = new char[status.size() + 1];
                 strcpy_s(statusCopy, status.size() + 1, status.c_str());
                 ::PostMessage(hwndProgress, WM_UPDATE_PROGRESS_TEXT, 0, (LPARAM)statusCopy);
-                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
 
-            const fs::path ras3Dir = Globals::kRAS3;
-            if (Util::PathExists(ras3Dir)) {
-                for (const auto& entry : fs::directory_iterator(ras3Dir)) {
-                    if (entry.path().extension() == ".jwt") {
-                        if (entry.path().filename().string().find(xmlInfo->snpid) != std::string::npos) {
-                            FileOps::DeleteItem(entry.path());
+            if (xmlInfo.has_value()) {
+                const fs::path ras3Dir = Globals::kRAS3;
+                if (Util::PathExists(ras3Dir)) {
+                    for (const auto& entry : fs::directory_iterator(ras3Dir)) {
+                        if (entry.path().extension() == ".jwt") {
+                            if (entry.path().filename().string().find(xmlInfo->snpid) != std::string::npos) {
+                                FileOps::DeleteItem(entry.path());
+                            }
                         }
                     }
                 }
@@ -1511,7 +1794,7 @@ namespace K8 {
                     char* statusCopy   = new char[status.size() + 1];
                     strcpy_s(statusCopy, status.size() + 1, status.c_str());
                     ::PostMessage(hwndProgress, WM_UPDATE_PROGRESS_TEXT, 0, (LPARAM)statusCopy);
-                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 }
 
                 if (!FileOps::DeleteItem(contentDir)) {
@@ -1531,7 +1814,7 @@ namespace K8 {
                 char* statusCopy   = new char[status.size() + 1];
                 strcpy_s(statusCopy, status.size() + 1, status.c_str());
                 ::PostMessage(hwndProgress, WM_UPDATE_PROGRESS_TEXT, 0, (LPARAM)statusCopy);
-                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
 
             if (backupRegistry) {
@@ -1629,6 +1912,7 @@ namespace K8 {
 
     private:
         void ToggleSelectedButtons(bool enabled) const {
+            ::EnableWindow(_removeButton, FALSE);  // Feature not enabled yet
             ::EnableWindow(_removeSelectedButton, (BOOL)enabled);
             ::EnableWindow(_relocateSelectedButton, (BOOL)enabled);
         }
@@ -1678,7 +1962,7 @@ namespace K8 {
             }
 
             // Initialize COM
-            auto hr = ::CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+            auto hr = ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
             if (FAILED(hr)) {
                 throw ApplicationError("Failed to initialize COM library.");
             }
@@ -1687,7 +1971,7 @@ namespace K8 {
             INITCOMMONCONTROLSEX icc;
             icc.dwSize = sizeof(icc);
             icc.dwICC  = ICC_WIN95_CLASSES | ICC_STANDARD_CLASSES | ICC_LISTVIEW_CLASSES;
-            InitCommonControlsEx(&icc);
+            ::InitCommonControlsEx(&icc);
 
             // Create window
             WNDCLASS wc      = {0};
@@ -1704,18 +1988,18 @@ namespace K8 {
             const int win_x    = (screen_w - _width) / 2;
             const int win_y    = (screen_h - _height) / 2;
 
-            _hwnd = CreateWindowEx(0,
-                                   wc.lpszClassName,
-                                   _title,
-                                   WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN,
-                                   win_x,
-                                   win_y,
-                                   _width,
-                                   _height,
-                                   nullptr,
-                                   nullptr,
-                                   _hInstance,
-                                   this);
+            _hwnd = ::CreateWindowEx(0,
+                                     wc.lpszClassName,
+                                     _title,
+                                     WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN,
+                                     win_x,
+                                     win_y,
+                                     _width,
+                                     _height,
+                                     nullptr,
+                                     nullptr,
+                                     _hInstance,
+                                     this);
             if (_hwnd == nullptr) {
                 throw ApplicationError("Failed to create window.");
             }
@@ -1744,11 +2028,9 @@ namespace K8 {
                 lvi.iItem    = static_cast<int>(i);
                 lvi.iSubItem = 0;
                 lvi.pszText  = const_cast<char*>(_libraries[i].name);
+
                 ListView_InsertItem(_listView, &lvi);
-
                 ListView_SetItemText(_listView, static_cast<int>(i), 1, const_cast<char*>(_libraries[i].contentDir));
-
-                // Convert size on disk to string
                 const auto sizeOnDisk = Util::FormatFileSize(_libraries[i].sizeOnDisk);
                 ListView_SetItemText(_listView, static_cast<int>(i), 2, const_cast<char*>(sizeOnDisk.c_str()));
             }
@@ -1811,38 +2093,38 @@ namespace K8 {
         }
 
         void OnCreate(HWND hwnd) {
-            _font = CreateFont(16,
-                               0,
-                               0,
-                               0,
-                               FW_NORMAL,
-                               FALSE,
-                               FALSE,
-                               FALSE,
-                               DEFAULT_CHARSET,
-                               OUT_DEFAULT_PRECIS,
-                               CLIP_DEFAULT_PRECIS,
-                               DEFAULT_QUALITY,
-                               DEFAULT_PITCH | FF_DONTCARE,
-                               "Segoe UI");
+            _font = ::CreateFont(16,
+                                 0,
+                                 0,
+                                 0,
+                                 FW_NORMAL,
+                                 FALSE,
+                                 FALSE,
+                                 FALSE,
+                                 DEFAULT_CHARSET,
+                                 OUT_DEFAULT_PRECIS,
+                                 CLIP_DEFAULT_PRECIS,
+                                 DEFAULT_QUALITY,
+                                 DEFAULT_PITCH | FF_DONTCARE,
+                                 "Segoe UI");
             if (!_font) {
                 _Warn("Failed to create default font. Falling back to system font.");
             }
 
-            HMENU hMenubar = CreateMenu();
-            HMENU hMenu    = CreateMenu();
+            HMENU hMenubar = ::CreateMenu();
+            HMENU hMenu    = ::CreateMenu();
 
-            AppendMenu(hMenu, MF_STRING, ID_MENU_VIEW_LOG, "&View Log");
-            AppendMenu(hMenu, MF_STRING, ID_MENU_RESCAN_LIBRARIES, "&Rescan Libraries");
-            AppendMenu(hMenu, MF_STRING, ID_MENU_COLLECT_BACKUPS, "&Collect Backups and Zip");
-            AppendMenu(hMenu, MF_STRING, ID_MENU_EXPORT_LIBRARY_LIST, "&Export Library List");
-            AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
-            AppendMenu(hMenu, MF_STRING, ID_MENU_ABOUT, "&About");
-            AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
-            AppendMenu(hMenu, MF_STRING, ID_MENU_EXIT, "E&xit");
+            ::AppendMenu(hMenu, MF_STRING, ID_MENU_VIEW_LOG, "&View Log");
+            ::AppendMenu(hMenu, MF_STRING, ID_MENU_RESCAN_LIBRARIES, "&Rescan Libraries");
+            ::AppendMenu(hMenu, MF_STRING, ID_MENU_COLLECT_BACKUPS, "&Collect Backups and Zip");
+            ::AppendMenu(hMenu, MF_STRING, ID_MENU_EXPORT_LIBRARY_LIST, "&Export Library List");
+            ::AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
+            ::AppendMenu(hMenu, MF_STRING, ID_MENU_ABOUT, "&About");
+            ::AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
+            ::AppendMenu(hMenu, MF_STRING, ID_MENU_EXIT, "E&xit");
 
-            AppendMenu(hMenubar, MF_POPUP, (UINT_PTR)hMenu, "&Menu");
-            SetMenu(hwnd, hMenubar);
+            ::AppendMenu(hMenubar, MF_POPUP, (UINT_PTR)hMenu, "&Menu");
+            ::SetMenu(hwnd, hMenubar);
 
             _label = ::CreateWindow("STATIC",
                                     "Select a library to remove:",
@@ -1918,6 +2200,7 @@ namespace K8 {
                                              _hInstance,
                                              nullptr);
             ::SendMessage(_removeButton, WM_SETFONT, (WPARAM)_font, TRUE);
+            ::EnableWindow(_removeButton, FALSE);
 
             _removeSelectedButton = ::CreateWindowEx(0,
                                                      "BUTTON",
@@ -2031,9 +2314,44 @@ namespace K8 {
         }
 
         void OnRelocateSelected() {
-            ::MessageBox(_hwnd, "This feature isn't available yet.", "K8Tool", MB_OK | MB_ICONWARNING);
-            // const auto result = Dialog::ShowRelocateSelected(_hInstance, _hwnd);
-            // if (result == ID_RELOCATE_SELECTED_RELOCATE) {}
+            if (_worker.joinable()) {
+                ::MessageBox(_hwnd,
+                             "An operation is already running. Please wait until it finishes.",
+                             "K8Tool",
+                             MB_OK | MB_ICONWARNING);
+                return;
+            }
+
+            if (_selectedLibrary.empty())
+                return;
+
+            const LibraryInfo& lib = _libraries[_selectedIndex];
+
+            Dialog::Data::RelocateSelectedDialogData data;
+            data.libraryInfo = lib;
+            data.newPath     = nullptr;
+
+            const auto result = Dialog::ShowRelocateSelected(_hInstance, _hwnd, &data);
+            if (result == ID_RELOCATE_SELECTED_RELOCATE) {
+                _Info("Relocating library:\n  - Name: %s\n  - Content Directory: %s\n  - New Content Directory: %s",
+                      lib.name,
+                      lib.contentDir,
+                      data.newPath);
+
+                ShowProgress(std::format("Relocating '{}'...", lib.name).c_str());
+
+                // Spawn removal thread
+                _worker = std::jthread([&](std::stop_token st) {
+                    Threads::RelocateSelected(_hwnd,
+                                              _hProgress,
+                                              lib.name,
+                                              lib.contentDir,
+                                              lib.registryRoot,
+                                              lib.subKey,
+                                              data.newPath,
+                                              st);
+                });
+            }
         }
 
         void OnRescanLibraries() {
@@ -2126,12 +2444,11 @@ namespace K8 {
             delete result;
         }
 
-        void OnRemoveSelectedCompleted(const Threads::RemoveSelectedResult* result) {
+        void OnRemoveSelectedCompleted(const Threads::ThreadResult* result) {
             HideProgress();
 
             const bool success   = result->success;
             const bool cancelled = result->cancelled;
-            delete result;
 
             _worker = {};
 
@@ -2142,9 +2459,43 @@ namespace K8 {
                 if (cancelled) {
                     ::MessageBox(_hwnd, "Operation was cancelled.", "K8Tool", MB_OK | MB_ICONWARNING);
                 } else {
-                    ::MessageBox(_hwnd, "Failed to remove library.", "K8Tool", MB_OK | MB_ICONERROR);
+                    const auto msg = std::format("An error occurred during removal:\n\n{}", result->errorMessage);
+                    ::MessageBox(_hwnd, msg.c_str(), "K8Tool", MB_OK | MB_ICONERROR);
                 }
             }
+
+            _selectedIndex   = -1;
+            _selectedLibrary = {};
+            ToggleSelectedButtons(false);
+
+            delete result;
+        }
+
+        void OnRelocateSelectedCompleted(const Threads::ThreadResult* result) {
+            HideProgress();
+
+            const bool success   = result->success;
+            const bool cancelled = result->cancelled;
+
+            _worker = {};
+
+            if (success) {
+                ::MessageBox(_hwnd, "Library relocated successfully.", "K8Tool", MB_OK | MB_ICONINFORMATION);
+                RescanAndReset(true);
+            } else {
+                if (cancelled) {
+                    ::MessageBox(_hwnd, "Operation was cancelled.", "K8Tool", MB_OK | MB_ICONWARNING);
+                } else {
+                    const auto msg = std::format("An error occurred during relocation:\n\n{}", result->errorMessage);
+                    ::MessageBox(_hwnd, msg.c_str(), "K8Tool", MB_OK | MB_ICONERROR);
+                }
+            }
+
+            _selectedIndex   = -1;
+            _selectedLibrary = {};
+            ToggleSelectedButtons(false);
+
+            delete result;
         }
 
         void OnExportLibraryList() {
@@ -2275,9 +2626,9 @@ namespace K8 {
                 }
 
                 case WM_REMOVE_SELECTED_COMPLETED: {
-                    const auto result = reinterpret_cast<Threads::RemoveSelectedResult*>(lParam);
+                    const auto result = reinterpret_cast<Threads::ThreadResult*>(lParam);
                     if (!result) {
-                        _Error("Failed to get result from update check.");
+                        _Error("Failed to get result from remove selected operation.");
                         break;
                     }
                     OnRemoveSelectedCompleted(result);
@@ -2300,6 +2651,16 @@ namespace K8 {
 
                 case WM_UPDATE_PROGRESS_TEXT: {
                     UpdateProgressText((const char*)lParam);
+                }
+
+                case WM_RELOCATE_SELECTED_COMPLETED: {
+                    const auto result = reinterpret_cast<Threads::ThreadResult*>(lParam);
+                    if (!result) {
+                        _Error("Failed to get result from relocate operation.");
+                        break;
+                    }
+                    OnRelocateSelectedCompleted(result);
+                    break;
                 }
             }
 
